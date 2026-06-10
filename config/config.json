@@ -1,0 +1,12 @@
+{
+  "strategy": "MyStrategy.cs",
+  "typeName": "MyStrategy",
+  "instrument": "ES 06-25",
+  "barType": {"type": "Minute", "value": 5},
+  "from": "2024-01-01",
+  "to": "2024-12-31",
+  "capital": 50000,
+  "commission": "MyCommissionTemplate",
+  "slippageTicks": 1,
+  "params": {"Period": 14, "StopTicks": 40, "TargetTicks": 80}
+}

@@ -1,0 +1,11 @@
+{
+  "base": {
+    "strategy": "MyStrategy.cs",
+    "typeName": "MyStrategy"
+  },
+  "runs": [
+    {"label": "tight",  "params": {"StopTicks": 30, "TargetTicks": 60}},
+    {"label": "wide",   "params": {"StopTicks": 50, "TargetTicks": 120}},
+    {"label": "scaled", "params": {"StopTicks": 40, "TargetTicks": 80, "Contracts": 2}}
+  ]
+}

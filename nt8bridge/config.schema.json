@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["strategy", "typeName", "instrument", "barType", "from", "to", "capital"],
+  "properties": {
+    "strategy": {"type": "string"},
+    "typeName": {"type": "string"},
+    "instrument": {"type": "string"},
+    "barType": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {"type": "string"},
+        "value": {"type": "integer"}
+      }
+    },
+    "from": {"type": "string"},
+    "to": {"type": "string"},
+    "capital": {"type": "number"},
+    "commission": {"type": "string"},
+    "slippageTicks": {"type": "integer"},
+    "params": {"type": "object"}
+  }
+}
