@@ -34,8 +34,16 @@ The AddOn polls `…\Documents\NinjaTrader 8\NT8Bridge\trigger\` for request fil
 git clone git@github.com:eman007/cli-nt-bridge.git
 cd cli-nt-bridge
 python -m venv .venv
-.venv/Scripts/python -m pip install -e ".[dev,report]"
+.venv\Scripts\Activate.ps1                  # PowerShell: activate the venv for this shell
+python -m pip install -e ".[dev,report]"
 ```
+
+Every command below assumes the venv is **active** — you'll see `(.venv)` in your
+prompt. If you don't activate it, a bare `python` runs your *global* interpreter,
+which won't have this project's dependencies (you'll get
+`ModuleNotFoundError: No module named 'jsonschema'`). If activation is inconvenient
+or PowerShell blocks the activate script, just prefix every command with the venv's
+Python instead: `.venv\Scripts\python -m nt8bridge …`
 
 Then load the AddOn into NinjaTrader **once**:
 
