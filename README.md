@@ -140,4 +140,5 @@ Developed and verified against NinjaTrader 8.1.x on Windows. NT8 Bridge uses som
 
 ## License
 
-No license file is included yet — add the license of your choice before sharing publicly.
+[MIT](LICENSE) — free to use, copy, modify, and distribute; provided "as is" with no
+warranty and no liability.
