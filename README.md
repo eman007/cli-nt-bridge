@@ -67,6 +67,7 @@ python -m nt8bridge deploy   --strategy X.cs   # atomic copy into bin/Custom (--
 python -m nt8bridge compile  --type MyStrategy # compile INSIDE NinjaTrader, return its real errors
 python -m nt8bridge backtest --config c.json   # auto-run a Strategy Analyzer backtest (--pdf for a report)
 python -m nt8bridge batch    --batch  b.json   # run N param-sets -> combined report (--pdf)
+python -m nt8bridge account  --name SimAccount2 # read NinjaTrader live state (positions/orders/PnL/fills)
 python -m nt8bridge watchdog                   # restart NinjaTrader if it hangs/crashes
 ```
 
@@ -113,6 +114,26 @@ python -m nt8bridge batch --batch config/batch.json --timeout 600 --pdf batch_re
 ### PDF reports
 
 `--pdf` renders a one-page report (needs the `report` extra / matplotlib): KPI tiles, a filled equity curve with the running peak, an underwater-drawdown panel, and a win/loss trade histogram. The batch report is a summary table plus a net-P&L-by-run bar chart.
+
+### account
+
+Reads NinjaTrader's **live** account state directly from the in-process AddOn — an independent, out-of-band channel from any status/position feed your strategy publishes. Use `--name` to filter to one account; omit it for all accounts.
+
+```bash
+python -m nt8bridge account --name SimAccount2
+```
+
+```json
+{ "status": "ok", "ts": "2026-01-02T15:04:05Z",
+  "accounts": [ { "name": "SimAccount2", "realizedPnl": 90.9, "unrealizedPnl": 0.0,
+    "positions": [],
+    "workingOrders": [],
+    "recentExecutions": [ { "instrument": "MNQ 06-26", "marketPosition": "Long", "quantity": 1,
+                            "price": 28678.5, "time": "2026-01-02T14:04:00Z", "commission": 0.65,
+                            "orderName": "E_13c1bd63" } ] } ] }
+```
+
+It answers the questions a stalled status feed can't: **is a position actually open right now**, what are the live stop/target orders, and what were the real fills. Read-only — it never submits, cancels, or flattens. A timeout means NinjaTrader is down or the AddOn isn't loaded (itself a useful signal).
 
 ### watchdog
 

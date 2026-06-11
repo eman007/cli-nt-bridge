@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 
+from nt8bridge import account as ntaccount
 from nt8bridge import backtest as ntbacktest
 from nt8bridge import batch as ntbatch
 from nt8bridge import compile as ntcompile
@@ -26,6 +27,7 @@ Commands:
   python -m nt8bridge compile  --type MyStrategy in-process compile (needs AddOn)
   python -m nt8bridge backtest --config c.json   auto backtest in NT8 (--pdf for report)
   python -m nt8bridge batch    --batch b.json    run N param-sets -> combined report (--pdf)
+  python -m nt8bridge account  --name SimAccount2 read NT8 live state (positions/orders/PnL)
   python -m nt8bridge watchdog                   restart NT8 if it hangs/crashes
 
 Full reference: NT8Bridge/README.md
@@ -143,6 +145,24 @@ def _backtest(config_path: str, timeout: float, pdf=None) -> int:
     return 0 if payload.get("status") == "ok" else 1
 
 
+def _account(name: str, timeout: float) -> int:
+    try:
+        payload = ntaccount.run_account_state(name, timeout=timeout)
+    except TimeoutError as e:
+        # A timeout is itself diagnostic: NT8 down, or NT8BridgeServer AddOn not loaded.
+        print(
+            json.dumps(
+                {"command": "account", "status": "timeout", "ok": False, "message": str(e)},
+                indent=2,
+            )
+        )
+        return 1
+    out = {"command": "account"}
+    out.update(payload)
+    print(json.dumps(out, indent=2))
+    return 0 if payload.get("status") == "ok" else 1
+
+
 def _batch(batch_path: str, timeout: float, pdf=None) -> int:
     try:
         spec = ntbatch.load_batch(batch_path)
@@ -191,6 +211,9 @@ def main(argv: list[str]) -> int:
     p_bt.add_argument("--config", required=True)
     p_bt.add_argument("--timeout", type=float, default=120.0)
     p_bt.add_argument("--pdf", nargs="?", const="report.pdf", default=None)
+    p_acct = sub.add_parser("account")
+    p_acct.add_argument("--name", default="", help="account name filter, e.g. SimAccount2 (empty = all)")
+    p_acct.add_argument("--timeout", type=float, default=15.0)
     p_batch = sub.add_parser("batch")
     p_batch.add_argument("--batch", required=True)
     p_batch.add_argument("--timeout", type=float, default=120.0)
@@ -215,6 +238,8 @@ def main(argv: list[str]) -> int:
         return _compile(args.type, args.timeout)
     if args.command == "backtest":
         return _backtest(args.config, args.timeout, args.pdf)
+    if args.command == "account":
+        return _account(args.name, args.timeout)
     if args.command == "batch":
         return _batch(args.batch, args.timeout, args.pdf)
     if args.command == "watchdog":

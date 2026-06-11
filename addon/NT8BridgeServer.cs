@@ -116,25 +116,38 @@ namespace NinjaTrader.NinjaScript.AddOns
         private void HandleTrigger(string file)
         {
             string id = null;
+            string kind = null;
             try
             {
                 string text = File.ReadAllText(file);
                 try { File.Delete(file); } catch { }   // consume the trigger
                 id = ExtractJsonString(text, "id");
-                string kind = ExtractJsonString(text, "kind");
+                kind = ExtractJsonString(text, "kind");
                 if (kind == "compile")
                     WriteResult("compile_" + id + ".json", RunCompile(id));
                 else if (kind == "backtest")
                     RunBacktest(id, ParseParams(text));
+                else if (kind == "account")
+                    WriteResult("account_" + id + ".json", RunAccountState(id, ExtractJsonString(text, "account")));
             }
             catch (Exception ex)
             {
                 LogSafe("HandleTrigger: " + ex.Message);
                 if (id != null)
-                    WriteResult("compile_" + id + ".json",
+                    // route the fallback error to the file the caller polls (compile_/backtest_/account_).
+                    WriteResult(ResultPrefix(kind) + id + ".json",
                         "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"errors\":[{\"file\":\"\",\"line\":0," +
                         "\"code\":\"BRIDGE\",\"message\":" + JsonStr(ex.Message) + "}],\"assemblyReloaded\":false}");
             }
+        }
+
+        // result-file prefix per request kind, so a dispatch-level failure lands in the
+        // file the caller is polling rather than always compile_.
+        private static string ResultPrefix(string kind)
+        {
+            if (kind == "account") return "account_";
+            if (kind == "backtest") return "backtest_";
+            return "compile_";
         }
 
         private string RunCompile(string id)
@@ -457,6 +470,146 @@ namespace NinjaTrader.NinjaScript.AddOns
             return "{\"id\":" + JsonStr(id) + ",\"status\":\"" + status + "\",\"errors\":[" +
                    string.Join(",", errors.ToArray()) + "],\"assemblyReloaded\":false}";
         }
+
+        // --- Account state: independent, out-of-band read of NT8's own Account
+        // objects (open positions, working orders, realized/unrealized P&L, recent
+        // completed trades). This is a SEPARATE channel from any status/position feed
+        // a strategy publishes: when such a feed stalls (e.g. a closed trade booked as
+        // a $0 placeholder because position updates stopped), this still reads NT8's
+        // truth. Read-only — never submits/cancels/flattens.
+        // Every field access is wrapped so an API mismatch degrades to a null field
+        // rather than throwing; the whole body is guarded so a bad call returns a
+        // structured {status:"error"} instead of crashing the AddOn loop.
+        private string RunAccountState(string id, string accountFilter)
+        {
+            try
+            {
+                var sb = new StringBuilder();
+                sb.Append("{\"id\":").Append(JsonStr(id))
+                  .Append(",\"status\":\"ok\",\"ts\":").Append(JsonStr(DateTime.UtcNow.ToString("o")))
+                  .Append(",\"accounts\":[");
+
+                var accts = new List<Account>();
+                try { lock (Account.All) { foreach (Account a in Account.All) accts.Add(a); } } catch { }
+
+                bool firstAcct = true;
+                foreach (Account acct in accts)
+                {
+                    string name = SafeStr(delegate { return acct.Name; });
+                    if (!string.IsNullOrEmpty(accountFilter) && name != accountFilter) continue;
+                    if (!firstAcct) sb.Append(",");
+                    firstAcct = false;
+
+                    sb.Append("{\"name\":").Append(JsonStr(name));
+                    sb.Append(",\"realizedPnl\":").Append(AcctNum(acct, AccountItem.RealizedProfitLoss));
+                    sb.Append(",\"unrealizedPnl\":").Append(AcctNum(acct, AccountItem.UnrealizedProfitLoss));
+
+                    // open positions (only non-flat = live exposure)
+                    sb.Append(",\"positions\":[");
+                    var positions = new List<Position>();
+                    try { lock (acct.Positions) { foreach (Position p in acct.Positions) positions.Add(p); } } catch { }
+                    bool firstPos = true;
+                    foreach (Position p in positions)
+                    {
+                        string mp = SafeStr(delegate { return p.MarketPosition.ToString(); });
+                        if (mp == "Flat" || mp == "") continue;
+                        if (!firstPos) sb.Append(",");
+                        firstPos = false;
+                        sb.Append("{\"instrument\":").Append(JsonStr(SafeStr(delegate { return p.Instrument.FullName; })))
+                          .Append(",\"marketPosition\":").Append(JsonStr(mp))
+                          .Append(",\"quantity\":").Append(SafeInt(delegate { return p.Quantity; }).ToString(InvCi))
+                          .Append(",\"avgPrice\":").Append(SafeNum(delegate { return p.AveragePrice; }))
+                          .Append(",\"unrealizedPnl\":").Append(PosUnrealized(p))
+                          .Append("}");
+                    }
+                    sb.Append("]");
+
+                    // working orders (stops/targets/entries still live at NT8)
+                    sb.Append(",\"workingOrders\":[");
+                    var orders = new List<Order>();
+                    try { lock (acct.Orders) { foreach (Order o in acct.Orders) orders.Add(o); } } catch { }
+                    bool firstOrd = true;
+                    foreach (Order o in orders)
+                    {
+                        string st = SafeStr(delegate { return o.OrderState.ToString(); });
+                        if (!IsWorkingState(st)) continue;
+                        if (!firstOrd) sb.Append(",");
+                        firstOrd = false;
+                        sb.Append("{\"instrument\":").Append(JsonStr(SafeStr(delegate { return o.Instrument.FullName; })))
+                          .Append(",\"action\":").Append(JsonStr(SafeStr(delegate { return o.OrderAction.ToString(); })))
+                          .Append(",\"type\":").Append(JsonStr(SafeStr(delegate { return o.OrderType.ToString(); })))
+                          .Append(",\"quantity\":").Append(SafeInt(delegate { return o.Quantity; }).ToString(InvCi))
+                          .Append(",\"limitPrice\":").Append(SafeNum(delegate { return o.LimitPrice; }))
+                          .Append(",\"stopPrice\":").Append(SafeNum(delegate { return o.StopPrice; }))
+                          .Append(",\"name\":").Append(JsonStr(SafeStr(delegate { return o.Name; })))
+                          .Append(",\"state\":").Append(JsonStr(st))
+                          .Append("}");
+                    }
+                    sb.Append("]");
+
+                    // recent raw fills (entry + exit executions — the authoritative "what
+                    // actually filled"; account-level realizedPnl above is the session total).
+                    sb.Append(",\"recentExecutions\":[");
+                    var execs = new List<Execution>();
+                    try { lock (acct.Executions) { foreach (Execution e in acct.Executions) execs.Add(e); } } catch { }
+                    int from = execs.Count > RecentExecutionsMax ? execs.Count - RecentExecutionsMax : 0;
+                    bool firstEx = true;
+                    for (int xi = from; xi < execs.Count; xi++)
+                    {
+                        Execution e = execs[xi];
+                        if (!firstEx) sb.Append(",");
+                        firstEx = false;
+                        sb.Append("{\"instrument\":").Append(JsonStr(SafeStr(delegate { return e.Instrument.FullName; })))
+                          .Append(",\"marketPosition\":").Append(JsonStr(SafeStr(delegate { return e.MarketPosition.ToString(); })))
+                          .Append(",\"quantity\":").Append(SafeInt(delegate { return e.Quantity; }).ToString(InvCi))
+                          .Append(",\"price\":").Append(SafeNum(delegate { return e.Price; }))
+                          .Append(",\"time\":").Append(JsonStr(SafeStr(delegate { return e.Time.ToUniversalTime().ToString("o"); })))
+                          .Append(",\"commission\":").Append(SafeNum(delegate { return e.Commission; }))
+                          .Append(",\"orderName\":").Append(JsonStr(SafeStr(delegate { return e.Order.Name; })))
+                          .Append("}");
+                    }
+                    sb.Append("]}");
+                }
+                sb.Append("]}");
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"ts\":" +
+                       JsonStr(DateTime.UtcNow.ToString("o")) + ",\"accounts\":[],\"errors\":[{" +
+                       "\"code\":\"BRIDGE\",\"message\":" + JsonStr(ex.GetType().Name + ": " + ex.Message) + "}]}";
+            }
+        }
+
+        private static readonly System.Globalization.CultureInfo InvCi =
+            System.Globalization.CultureInfo.InvariantCulture;
+
+        // how many most-recent executions to include per account
+        private const int RecentExecutionsMax = 12;
+
+        private static bool IsWorkingState(string s)
+        {
+            return s == "Working" || s == "Accepted" || s == "Submitted" || s == "PartFilled"
+                || s == "TriggerPending" || s == "ChangeSubmitted" || s == "ChangePending"
+                || s == "CancelSubmitted";
+        }
+
+        private static string AcctNum(Account a, AccountItem item)
+        {
+            try { return Num(a.Get(item, Currency.UsDollar)); }
+            catch { return "null"; }
+        }
+
+        private static string PosUnrealized(Position p)
+        {
+            try { return Num(p.GetUnrealizedProfitLoss(PerformanceUnit.Currency, p.Instrument.MarketData.Last.Price)); }
+            catch { return "null"; }
+        }
+
+        private static string SafeStr(Func<string> f) { try { string s = f(); return s == null ? "" : s; } catch { return ""; } }
+        private static int SafeInt(Func<int> f) { try { return f(); } catch { return 0; } }
+        // like Num(...) on the getter, but a read FAILURE degrades to JSON null (not a misleading 0).
+        private static string SafeNum(Func<double> f) { try { return Num(f()); } catch { return "null"; } }
 
         private static object GetProp(Type t, object o, string name)
         {
