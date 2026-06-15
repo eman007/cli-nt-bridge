@@ -33,6 +33,8 @@ Commands:
   python -m nt8bridge backtest --config c.json   auto backtest in NT8 (--pdf for report)
   python -m nt8bridge batch    --batch b.json    run N param-sets -> combined report (--pdf)
   python -m nt8bridge account  --name SimAccount2 read NT8 live state (positions/orders/PnL)
+  python -m nt8bridge flatten  --name SimAccount2 force-close positions + cancel orders (kill switch)
+  python -m nt8bridge watch    --name SimAccount2 auto-flatten NAKED positions (loop)
   python -m nt8bridge connections                read connection status (live/dropped)
   python -m nt8bridge reconnect --name X         reconnect a dropped connection
   python -m nt8bridge connwatch --name X         auto-reconnect inadvertent drops (loop)
