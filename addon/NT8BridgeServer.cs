@@ -14,6 +14,7 @@
 #region Using declarations
 using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -36,6 +37,10 @@ namespace NinjaTrader.NinjaScript.AddOns
         private string _triggerDir;
         private string _resultDir;
         private volatile bool _beatInFlight;
+        // connection name -> last drop classification ("inadvertent"|"user"|"connected"),
+        // written by the ConnectionStatusUpdate event (fires on arbitrary threads) so it
+        // MUST be a ConcurrentDictionary; read by the poller thread (connections handler).
+        private readonly ConcurrentDictionary<string, string> _dropClass = new ConcurrentDictionary<string, string>();
 
         protected override void OnStateChange()
         {
@@ -51,6 +56,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 }
                 else if (State == State.Terminated)
                 {
+                    try { Connection.ConnectionStatusUpdate -= OnConnStatus; } catch { }
                     try { if (_poller != null) _poller.Dispose(); } catch { }
                     _poller = null;
                 }
@@ -70,6 +76,11 @@ namespace NinjaTrader.NinjaScript.AddOns
                 "{\"server\":\"NT8BridgeServer\",\"started\":" + JsonStr(Globals.Now.ToString("o")) + "}");
             // Poll once per second on wall-clock time; never tick-time.
             _poller = new Timer(delegate { Poll(); }, null, 1000, 1000);
+            // Classify every connection status change at the moment it happens (named
+            // handler so Terminated can unsubscribe it — no leak across reload cycles).
+            // ConnectionLost / error-disconnect = inadvertent (auto-reconnect eligible);
+            // clean Disconnected / UserAbort = the user parked it (never auto-reconnect).
+            try { Connection.ConnectionStatusUpdate += OnConnStatus; } catch (Exception ex) { LogSafe("conn subscribe: " + ex.Message); }
         }
 
         private void Poll()
@@ -129,6 +140,12 @@ namespace NinjaTrader.NinjaScript.AddOns
                     RunBacktest(id, ParseParams(text));
                 else if (kind == "account")
                     WriteResult("account_" + id + ".json", RunAccountState(id, ExtractJsonString(text, "account")));
+                else if (kind == "flatten")
+                    WriteResult("flatten_" + id + ".json", RunFlatten(id, ExtractJsonString(text, "account"), ExtractJsonString(text, "instrument")));
+                else if (kind == "connections")
+                    WriteResult("connections_" + id + ".json", RunConnections(id));
+                else if (kind == "reconnect")
+                    WriteResult("reconnect_" + id + ".json", RunReconnect(id, ExtractJsonString(text, "connection")));
             }
             catch (Exception ex)
             {
@@ -146,7 +163,10 @@ namespace NinjaTrader.NinjaScript.AddOns
         private static string ResultPrefix(string kind)
         {
             if (kind == "account") return "account_";
+            if (kind == "flatten") return "flatten_";
             if (kind == "backtest") return "backtest_";
+            if (kind == "connections") return "connections_";
+            if (kind == "reconnect") return "reconnect_";
             return "compile_";
         }
 
@@ -579,6 +599,220 @@ namespace NinjaTrader.NinjaScript.AddOns
                        JsonStr(DateTime.UtcNow.ToString("o")) + ",\"accounts\":[],\"errors\":[{" +
                        "\"code\":\"BRIDGE\",\"message\":" + JsonStr(ex.GetType().Name + ": " + ex.Message) + "}]}";
             }
+        }
+
+        // --- Force-close: flatten an account's position(s) and cancel its working
+        // orders. An automated strategy can leave a position stranded without a stop;
+        // this is the independent kill switch the `watch` watchdog calls when it
+        // sees an unprotected position. Account name is REQUIRED (refuses to
+        // flatten everything). Acts AFTER releasing the snapshot locks — never call
+        // Account.Cancel/Flatten while holding a collection lock.
+        private string RunFlatten(string id, string accountFilter, string instrumentFilter)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(accountFilter))
+                    return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"flattened\":[],\"errors\":[{" +
+                           "\"code\":\"BRIDGE\",\"message\":\"flatten requires an account name\"}]}";
+
+                Account acct = null;
+                try { lock (Account.All) { foreach (Account a in Account.All) { if (a.Name == accountFilter) { acct = a; break; } } } } catch { }
+                if (acct == null)
+                    return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"flattened\":[],\"errors\":[{" +
+                           "\"code\":\"BRIDGE\",\"message\":" + JsonStr("account not found: " + accountFilter) + "}]}";
+
+                var instrs = new List<Instrument>();
+                var flattened = new List<string>();
+                try {
+                    lock (acct.Positions) {
+                        foreach (Position p in acct.Positions) {
+                            string mp = SafeStr(delegate { return p.MarketPosition.ToString(); });
+                            if (mp == "Flat" || mp == "") continue;
+                            string fn = SafeStr(delegate { return p.Instrument.FullName; });
+                            if (!string.IsNullOrEmpty(instrumentFilter) && fn != instrumentFilter) continue;
+                            instrs.Add(p.Instrument);
+                            flattened.Add(fn + " " + mp + " qty=" + SafeInt(delegate { return p.Quantity; }).ToString(InvCi));
+                        }
+                    }
+                } catch { }
+
+                var ordersToCancel = new List<Order>();
+                try {
+                    lock (acct.Orders) {
+                        foreach (Order o in acct.Orders) {
+                            if (!IsWorkingState(SafeStr(delegate { return o.OrderState.ToString(); }))) continue;
+                            string fn = SafeStr(delegate { return o.Instrument.FullName; });
+                            if (!string.IsNullOrEmpty(instrumentFilter) && fn != instrumentFilter) continue;
+                            ordersToCancel.Add(o);
+                        }
+                    }
+                } catch { }
+
+                // act AFTER the locks are released (Lesson #159)
+                int cancelled = 0;
+                if (ordersToCancel.Count > 0) {
+                    try { acct.Cancel(ordersToCancel); cancelled = ordersToCancel.Count; }
+                    catch (Exception ex) { LogSafe("flatten cancel: " + ex.Message); }
+                }
+                bool flattenCalled = false;
+                if (instrs.Count > 0) {
+                    try { acct.Flatten(instrs); flattenCalled = true; }
+                    catch (Exception ex) { LogSafe("flatten: " + ex.Message); }
+                }
+                LogSafe("FLATTEN account=" + accountFilter + " instrument='" + instrumentFilter +
+                        "' positions=" + instrs.Count + " ordersCancelled=" + cancelled);
+
+                var sb = new StringBuilder();
+                sb.Append("{\"id\":").Append(JsonStr(id))
+                  .Append(",\"status\":\"ok\",\"ts\":").Append(JsonStr(DateTime.UtcNow.ToString("o")))
+                  .Append(",\"account\":").Append(JsonStr(accountFilter))
+                  .Append(",\"flattenCalled\":").Append(flattenCalled ? "true" : "false")
+                  .Append(",\"ordersCancelled\":").Append(cancelled.ToString(InvCi))
+                  .Append(",\"flattened\":[");
+                for (int i = 0; i < flattened.Count; i++) { if (i > 0) sb.Append(","); sb.Append(JsonStr(flattened[i])); }
+                sb.Append("]}");
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"flattened\":[],\"errors\":[{" +
+                       "\"code\":\"BRIDGE\",\"message\":" + JsonStr(ex.GetType().Name + ": " + ex.Message) + "}]}";
+            }
+        }
+
+        // ConnectionStatusUpdate handler (named so Terminated can unsubscribe — no leak).
+        // Records, per connection name, WHY it last left Connected: "inadvertent"
+        // (ConnectionLost or an error-disconnect — eligible for auto-reconnect), "user"
+        // (clean Disconnect or UserAbort — parked, NEVER auto-reconnected), or "connected"
+        // (recovered). Fires on arbitrary NT8 threads -> only touches the
+        // ConcurrentDictionary + logs; never blocks.
+        private void OnConnStatus(object sender, ConnectionStatusEventArgs e)
+        {
+            try
+            {
+                if (e == null || e.Connection == null || e.Connection.Options == null) return;
+                string name = e.Connection.Options.Name;
+                if (string.IsNullOrEmpty(name)) return;
+                ConnectionStatus s = e.Status;
+                if (s == ConnectionStatus.Connected)
+                    _dropClass[name] = "connected";
+                else if (s == ConnectionStatus.ConnectionLost)
+                    _dropClass[name] = "inadvertent";
+                else if (s == ConnectionStatus.Disconnected)
+                    _dropClass[name] = (e.Error == ErrorCode.NoError || e.Error == ErrorCode.UserAbort) ? "user" : "inadvertent";
+                // Connecting / Disconnecting: transient — leave the prior classification.
+                LogSafe("conn status: " + name + " -> " + s + " (err=" + e.Error + ")");
+            }
+            catch (Exception ex) { LogSafe("OnConnStatus: " + ex.Message); }
+        }
+
+        // Read every configured connection's live status + whether it dropped
+        // INADVERTENTLY (drop class "inadvertent" and not currently connected). The Python
+        // guardian keys on inadvertentlyDropped; a connection the user parked reads false.
+        private string RunConnections(string id)
+        {
+            try
+            {
+                var live = new List<Connection>();
+                try { lock (Connection.Connections) { foreach (Connection c in Connection.Connections) live.Add(c); } } catch { }
+                var cfg = new List<ConnectOptions>();
+                try { lock (Globals.ConnectOptions) { foreach (ConnectOptions o in Globals.ConnectOptions) cfg.Add(o); } } catch { }
+
+                var sb = new StringBuilder();
+                sb.Append("{\"id\":").Append(JsonStr(id))
+                  .Append(",\"status\":\"ok\",\"ts\":").Append(JsonStr(DateTime.UtcNow.ToString("o")))
+                  .Append(",\"connections\":[");
+                bool first = true;
+                foreach (ConnectOptions o in cfg)
+                {
+                    string nm = SafeStr(delegate { return o.Name; });
+                    string liveStatus = LiveStatusOf(live, nm);
+                    bool connected = liveStatus == "Connected";
+                    string cls; if (!_dropClass.TryGetValue(nm, out cls)) cls = "";
+                    bool inadvertent = cls == "inadvertent" && !connected;
+                    if (!first) sb.Append(",");
+                    first = false;
+                    sb.Append("{\"name\":").Append(JsonStr(nm))
+                      .Append(",\"status\":").Append(JsonStr(liveStatus))
+                      .Append(",\"connected\":").Append(connected ? "true" : "false")
+                      .Append(",\"inadvertentlyDropped\":").Append(inadvertent ? "true" : "false")
+                      .Append("}");
+                }
+                sb.Append("]}");
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"connections\":[],\"errors\":[{" +
+                       "\"code\":\"BRIDGE\",\"message\":" + JsonStr(ex.GetType().Name + ": " + ex.Message) + "}]}";
+            }
+        }
+
+        // Reconnect a configured connection by name via Connection.Connect(savedOptions),
+        // marshalled to the UI dispatcher (the spike-proven safe path). UNCONDITIONAL —
+        // an explicit reconnect is an operator override; the inadvertent-only POLICY lives
+        // in the Python guardian, not here. No-op (reports wasConnected) if already up.
+        private string RunReconnect(string id, string nameArg)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(nameArg))
+                    return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"errors\":[{" +
+                           "\"code\":\"BRIDGE\",\"message\":\"reconnect requires a connection name\"}]}";
+
+                var live = new List<Connection>();
+                try { lock (Connection.Connections) { foreach (Connection c in Connection.Connections) live.Add(c); } } catch { }
+                bool wasConnected = LiveStatusOf(live, nameArg) == "Connected";
+
+                ConnectOptions opt = null;
+                var cfg = new List<ConnectOptions>();
+                try { lock (Globals.ConnectOptions) { foreach (ConnectOptions o in Globals.ConnectOptions) cfg.Add(o); } } catch { }
+                foreach (ConnectOptions o in cfg)
+                    if (SafeStr(delegate { return o.Name; }) == nameArg) { opt = o; break; }
+                if (opt == null)
+                    return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"errors\":[{" +
+                           "\"code\":\"BRIDGE\",\"message\":" + JsonStr("connection not configured: " + nameArg) + "}]}";
+
+                bool attempted = false, threw = false; string err = "";
+                if (!wasConnected)
+                {
+                    Exception cap = null;
+                    ConnectOptions o2 = opt;
+                    Action act = delegate { try { Connection.Connect(o2); } catch (Exception ex) { cap = ex; } };
+                    try { var disp = Globals.MainThreadDispatcher; if (disp != null) disp.Invoke(act); else act(); }
+                    catch (Exception ex) { cap = ex; }
+                    attempted = true; threw = cap != null;
+                    if (threw) err = cap.GetType().Name + ": " + cap.Message;
+                    LogSafe("reconnect: " + nameArg + " attempted threw=" + threw + (threw ? " " + err : ""));
+                    System.Threading.Thread.Sleep(1500);   // let the async connect begin
+                }
+
+                var live2 = new List<Connection>();
+                try { lock (Connection.Connections) { foreach (Connection c in Connection.Connections) live2.Add(c); } } catch { }
+                string statusAfter = LiveStatusOf(live2, nameArg);
+
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"ok\",\"ts\":" + JsonStr(DateTime.UtcNow.ToString("o")) +
+                       ",\"name\":" + JsonStr(nameArg) +
+                       ",\"wasConnected\":" + (wasConnected ? "true" : "false") +
+                       ",\"connectAttempted\":" + (attempted ? "true" : "false") +
+                       ",\"connectThrew\":" + (threw ? "true" : "false") +
+                       ",\"connectError\":" + JsonStr(err) +
+                       ",\"statusAfter\":" + JsonStr(statusAfter) + "}";
+            }
+            catch (Exception ex)
+            {
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"errors\":[{" +
+                       "\"code\":\"BRIDGE\",\"message\":" + JsonStr(ex.GetType().Name + ": " + ex.Message) + "}]}";
+            }
+        }
+
+        // live ConnectionStatus for a configured connection name, or "(none)" if not active.
+        private static string LiveStatusOf(List<Connection> live, string name)
+        {
+            foreach (Connection c in live)
+                if (SafeStr(delegate { return c.Options != null ? c.Options.Name : ""; }) == name)
+                    return SafeStr(delegate { return c.Status.ToString(); });
+            return "(none)";
         }
 
         private static readonly System.Globalization.CultureInfo InvCi =

@@ -7,6 +7,11 @@ import json
 from nt8bridge import account as ntaccount
 from nt8bridge import backtest as ntbacktest
 from nt8bridge import batch as ntbatch
+from nt8bridge import flatten as ntflatten
+from nt8bridge import watch as ntwatch
+from nt8bridge import connections as ntconnections
+from nt8bridge import reconnect as ntreconnect
+from nt8bridge import connwatch as ntconnwatch
 from nt8bridge import compile as ntcompile
 from nt8bridge import config as ntconfig
 from nt8bridge import deploy, ntio, precheck
@@ -28,6 +33,9 @@ Commands:
   python -m nt8bridge backtest --config c.json   auto backtest in NT8 (--pdf for report)
   python -m nt8bridge batch    --batch b.json    run N param-sets -> combined report (--pdf)
   python -m nt8bridge account  --name SimAccount2 read NT8 live state (positions/orders/PnL)
+  python -m nt8bridge connections                read connection status (live/dropped)
+  python -m nt8bridge reconnect --name X         reconnect a dropped connection
+  python -m nt8bridge connwatch --name X         auto-reconnect inadvertent drops (loop)
   python -m nt8bridge watchdog                   restart NT8 if it hangs/crashes
 
 Full reference: NT8Bridge/README.md
@@ -163,6 +171,69 @@ def _account(name: str, timeout: float) -> int:
     return 0 if payload.get("status") == "ok" else 1
 
 
+def _flatten(name: str, instrument: str, timeout: float) -> int:
+    try:
+        payload = ntflatten.run_flatten(name, instrument, timeout=timeout)
+    except (TimeoutError, ValueError) as e:
+        print(json.dumps({"command": "flatten", "ok": False, "message": str(e)}, indent=2))
+        return 1
+    out = {"command": "flatten"}
+    out.update(payload)
+    print(json.dumps(out, indent=2))
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def _watch(names: list, grace: float, interval: float, once: bool) -> int:
+    try:
+        killed = ntwatch.watch(
+            names, grace_seconds=grace, interval=interval,
+            max_iterations=(1 if once else None),
+        )
+    except (ValueError, KeyboardInterrupt) as e:
+        print(json.dumps({"command": "watch", "status": "stopped", "message": str(e)}, indent=2))
+        return 0
+    print(json.dumps({"command": "watch", "ok": True, "accounts": names, "killed": killed}, indent=2))
+    return 0
+
+
+def _connections(timeout: float) -> int:
+    try:
+        payload = ntconnections.run_connections(timeout=timeout)
+    except TimeoutError as e:
+        # A timeout is diagnostic: NT8 down, or NT8BridgeServer AddOn not loaded.
+        print(json.dumps({"command": "connections", "status": "timeout", "ok": False, "message": str(e)}, indent=2))
+        return 1
+    out = {"command": "connections"}
+    out.update(payload)
+    print(json.dumps(out, indent=2))
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def _reconnect(name: str, timeout: float) -> int:
+    try:
+        payload = ntreconnect.run_reconnect(name, timeout=timeout)
+    except (TimeoutError, ValueError) as e:
+        print(json.dumps({"command": "reconnect", "ok": False, "message": str(e)}, indent=2))
+        return 1
+    out = {"command": "reconnect"}
+    out.update(payload)
+    print(json.dumps(out, indent=2))
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def _connwatch(names: list, grace: float, interval: float, max_attempts: int, once: bool) -> int:
+    try:
+        events = ntconnwatch.watch(
+            names, grace_seconds=grace, interval=interval, max_attempts=max_attempts,
+            max_iterations=(1 if once else None),
+        )
+    except (ValueError, KeyboardInterrupt) as e:
+        print(json.dumps({"command": "connwatch", "status": "stopped", "message": str(e)}, indent=2))
+        return 0
+    print(json.dumps({"command": "connwatch", "ok": True, "connections": names, "events": events}, indent=2))
+    return 0
+
+
 def _batch(batch_path: str, timeout: float, pdf=None) -> int:
     try:
         spec = ntbatch.load_batch(batch_path)
@@ -214,6 +285,26 @@ def main(argv: list[str]) -> int:
     p_acct = sub.add_parser("account")
     p_acct.add_argument("--name", default="", help="account name filter, e.g. SimAccount2 (empty = all)")
     p_acct.add_argument("--timeout", type=float, default=15.0)
+    p_flat = sub.add_parser("flatten")
+    p_flat.add_argument("--name", required=True, help="account to flatten, e.g. SimAccount2 (REQUIRED)")
+    p_flat.add_argument("--instrument", default="", help="limit to one instrument, e.g. 'MNQ 06-26' (empty = all)")
+    p_flat.add_argument("--timeout", type=float, default=20.0)
+    p_watch = sub.add_parser("watch")
+    p_watch.add_argument("--name", action="append", required=True, help="account(s) to watch; repeatable")
+    p_watch.add_argument("--grace", type=float, default=20.0, help="seconds a position may stay naked before kill")
+    p_watch.add_argument("--interval", type=float, default=5.0, help="seconds between scans")
+    p_watch.add_argument("--once", action="store_true", help="single scan (no loop) — for testing")
+    p_conns = sub.add_parser("connections")
+    p_conns.add_argument("--timeout", type=float, default=15.0)
+    p_recon = sub.add_parser("reconnect")
+    p_recon.add_argument("--name", required=True, help="connection name to reconnect (REQUIRED)")
+    p_recon.add_argument("--timeout", type=float, default=30.0)
+    p_cwatch = sub.add_parser("connwatch")
+    p_cwatch.add_argument("--name", action="append", required=True, help="connection(s) to guard; repeatable")
+    p_cwatch.add_argument("--grace", type=float, default=20.0, help="seconds a connection may stay dropped before reconnect")
+    p_cwatch.add_argument("--interval", type=float, default=10.0, help="seconds between scans")
+    p_cwatch.add_argument("--max-attempts", type=int, default=5, help="reconnect attempts before giving up (per drop)")
+    p_cwatch.add_argument("--once", action="store_true", help="single scan (no loop) — for testing")
     p_batch = sub.add_parser("batch")
     p_batch.add_argument("--batch", required=True)
     p_batch.add_argument("--timeout", type=float, default=120.0)
@@ -240,6 +331,16 @@ def main(argv: list[str]) -> int:
         return _backtest(args.config, args.timeout, args.pdf)
     if args.command == "account":
         return _account(args.name, args.timeout)
+    if args.command == "flatten":
+        return _flatten(args.name, args.instrument, args.timeout)
+    if args.command == "watch":
+        return _watch(args.name, args.grace, args.interval, args.once)
+    if args.command == "connections":
+        return _connections(args.timeout)
+    if args.command == "reconnect":
+        return _reconnect(args.name, args.timeout)
+    if args.command == "connwatch":
+        return _connwatch(args.name, args.grace, args.interval, args.max_attempts, args.once)
     if args.command == "batch":
         return _batch(args.batch, args.timeout, args.pdf)
     if args.command == "watchdog":

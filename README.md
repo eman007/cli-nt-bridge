@@ -68,6 +68,11 @@ python -m nt8bridge compile  --type MyStrategy # compile INSIDE NinjaTrader, ret
 python -m nt8bridge backtest --config c.json   # auto-run a Strategy Analyzer backtest (--pdf for a report)
 python -m nt8bridge batch    --batch  b.json   # run N param-sets -> combined report (--pdf)
 python -m nt8bridge account  --name SimAccount2 # read NinjaTrader live state (positions/orders/PnL/fills)
+python -m nt8bridge flatten  --name SimAccount2 # force-close an account's positions + orders (kill switch)
+python -m nt8bridge watch    --name SimAccount2 # auto-flatten NAKED (unprotected) positions (loop)
+python -m nt8bridge connections                # read connection status (live / inadvertently dropped)
+python -m nt8bridge reconnect --name X         # reconnect a dropped connection (on-demand override)
+python -m nt8bridge connwatch --name X         # auto-reconnect INADVERTENT drops only (loop)
 python -m nt8bridge watchdog                   # restart NinjaTrader if it hangs/crashes
 ```
 
@@ -134,6 +139,28 @@ python -m nt8bridge account --name SimAccount2
 ```
 
 It answers the questions a stalled status feed can't: **is a position actually open right now**, what are the live stop/target orders, and what were the real fills. Read-only — it never submits, cancels, or flattens. A timeout means NinjaTrader is down or the AddOn isn't loaded (itself a useful signal).
+
+### Recovery — positions & connections
+
+Out-of-band recovery that works independently of whatever feed your strategy uses, so it still functions when that feed stalls. Everything reads NinjaTrader's own truth through the AddOn.
+
+**Positions**
+
+- `flatten --name X` — force-closes account `X`'s open position(s) and cancels its working orders; a kill switch for a position a strategy lost track of. The account name is **required** (it refuses to flatten everything); add `--instrument "MNQ 06-26"` to limit it to one instrument.
+- `watch --name X` — a loop that flattens **naked** positions (an open position with no working protective **stop**; a lone profit-target limit is not protection). Scoped to the `--name` allow-list, with a `--grace` period so it never kills a trade mid-bracket-placement.
+
+**Connections**
+
+- `connections` — lists every configured connection with its live status and whether it dropped **inadvertently**.
+- `reconnect --name X` — reconnects a connection on demand (an unconditional override).
+- `connwatch --name X` — a loop that auto-reconnects **only inadvertent drops** (`ConnectionLost` / error-disconnect). A connection you disconnect yourself (`Disconnected` / `UserAbort`) is classified *parked* and never auto-reconnected. Allow-list (`--name`, repeatable) + `--grace` + exponential backoff; it logs and gives up (surfacing the problem) if a connection won't come back — e.g. an expired login needing a manual refresh. Runs alongside NinjaTrader's own auto-reconnect, covering the tail it doesn't.
+
+```json
+{ "status": "ok", "connections": [
+  { "name": "MyBroker", "status": "Connected", "connected": true, "inadvertentlyDropped": false } ] }
+```
+
+The intent classification comes from NinjaTrader's own `ConnectionStatusUpdate` event + `ErrorCode`, so "did the user disconnect this, or did it drop?" is NinjaTrader's answer, not a guess.
 
 ### watchdog
 
