@@ -79,11 +79,135 @@ def _validation_gate(replay_dir, instrument_glob: str, out_dir, mode: str, timeo
             "detail": "no existing CSV to diff — gate skipped (construction-equivalence only)"}
 
 
+def _offline_target(out_dir, sym, date, level):
+    """Parquet path for one (sym, date, level) in the season-year layout."""
+    from nt8bridge import nrd_offline as N
+    season = N.season_year(sym, date)
+    return Path(out_dir) / season / f"{sym}-{season}_{level}" / f"{date}.parquet"
+
+
+def _run_offline(*, instrument_glob, out_dir, replay_dir, levels, force):
+    """Decode each discovered .nrd offline -> L1/L2 UTC parquet. No NinjaTrader."""
+    from nt8bridge import nrd_offline as N
+    import pyarrow.parquet as pq
+    out_dir = Path(out_dir)
+    disc = N.discover(Path(replay_dir), instrument_glob)
+    exported: list[str] = []
+    failed: list[dict] = []
+    truncated: list[dict] = []
+    want_l1, want_l2 = "L1" in levels, "L2" in levels
+    for (sym, date), nrd in sorted(disc.items()):
+        if not (force or any(not _offline_target(out_dir, sym, date, lv).exists() for lv in levels)):
+            continue
+        try:
+            dec = N.convert_file(nrd, want_l1=want_l1, want_l2=want_l2, salvage=True)
+        except (N.FormatError, OSError) as e:
+            # A genuinely unknown encoding / unreadable file fails this day only; run continues.
+            failed.append({"file": f"{sym}/{date}", "error": str(e)})
+            continue
+        if dec.get("truncated"):
+            rows = (len(dec["L1"][0]) if want_l1 else 0) + (len(dec["L2"][0]) if want_l2 else 0)
+            truncated.append({"file": f"{sym}/{date}", "rows": rows})
+        for lv in levels:
+            tbl = N.build_table(dec[lv], nrd) if lv == "L1" else N.build_table_l2(dec[lv], nrd)
+            out = _offline_target(out_dir, sym, date, lv)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_suffix(f".tmp{os.getpid()}")   # sibling of final -> atomic replace
+            pq.write_table(tbl, tmp, compression="zstd")
+            os.replace(tmp, out)
+        exported.append(f"{sym}/{date}")
+    return {"status": "ok", "engine": "offline", "exported": exported,
+            "failed": failed, "truncated": truncated, "count": len(exported)}
+
+
+def _validate_offline(*, instrument_glob, replay_dir, levels, timeout):
+    """Offline equivalence check: decode the first discovered .nrd and diff every field
+    against a FRESH NT8 DumpMarketDepth of the same file (needs NinjaTrader). Writes nothing.
+    Timestamps are UTC offline vs ET in the NT8 CSV by design, so ts is not field-compared;
+    on a truncated day NT8 keeps one extra garbage trailing row, which is expected."""
+    from nt8bridge import nrd_offline as N
+    import numpy as np
+    disc = N.discover(Path(replay_dir), instrument_glob)
+    if not disc:
+        return {"status": "gate_skipped", "detail": "no .nrd found for glob", "checked": []}
+    (sym, date), nrd = sorted(disc.items())[0]
+    contract = nrd.parent.name
+    tmp = Path(replay_dir).parent / (f".validate_{contract}_{date}.csv".replace(" ", "_"))
+    try:
+        res = dump_one(contract, date, str(tmp), "depth", timeout)
+    except TimeoutError:
+        _unlink(tmp)
+        return {"status": "gate_skipped",
+                "detail": "NinjaTrader unavailable (dump timed out) — no ground truth", "checked": []}
+    if not (_ok(res) and tmp.exists() and tmp.stat().st_size > 0):
+        _unlink(tmp)
+        return {"status": "gate_skipped",
+                "detail": f"NT8 produced no CSV: {res.get('error') or res.get('message')}", "checked": []}
+
+    raw = nrd.read_bytes()
+    slots = N.parse_headers(raw[:N.N_SLOTS * 80])
+    tick = next((s["tick"] for s in slots if s["count"]), None) or 0.25
+    ndp = N._price_decimals(tick)
+    dec = N.convert_file(nrd, salvage=True)
+
+    g1_mdt, g1_price, g1_vol = [], [], []
+    g2_side, g2_op, g2_pos, g2_price, g2_vol = [], [], [], [], []
+    with open(tmp) as f:
+        for line in f:
+            p = line.rstrip("\n").split(";")
+            if p[0] == "L1":
+                g1_mdt.append(int(p[1])); g1_price.append(round(float(p[4]), ndp)); g1_vol.append(int(p[5]))
+            elif p[0] == "L2":
+                g2_side.append(int(p[1])); g2_op.append(int(p[4])); g2_pos.append(int(p[5]))
+                g2_price.append(round(float(p[7]), ndp)); g2_vol.append(int(p[8]))
+    _unlink(tmp)
+
+    def check(name, dec_arrays, gcols, field_names):
+        dn, gn = len(dec_arrays[0]), len(gcols[0])
+        count_ok = (dn == gn) or (dec.get("truncated") and gn - dn == 1)
+        m = min(dn, gn)
+        mism = None
+        for fname, da, gb in zip(field_names, dec_arrays[1:], gcols):
+            a = da[:m]; g = np.array(gb[:m])
+            if a.dtype.kind == "f":
+                bad = np.nonzero(~np.isclose(a.astype("float64"), g.astype("float64"), atol=1e-9))[0]
+            else:
+                bad = np.nonzero(a.astype("int64") != g.astype("int64"))[0]
+            if len(bad):
+                i0 = int(bad[0]); mism = f"{fname}@{i0}: decoded {a[i0]} vs nt8 {g[i0]}"; break
+        entry = {"level": name, "file": f"{contract}/{date}", "decoded": dn, "nt8": gn,
+                 "truncated": bool(dec.get("truncated")), "ok": bool(count_ok and mism is None)}
+        if not count_ok:
+            entry["count_mismatch"] = True
+        if mism:
+            entry["mismatch"] = mism
+        return entry
+
+    checked = []
+    if "L1" in levels:
+        checked.append(check("L1", dec["L1"], [g1_mdt, g1_price, g1_vol], ["mdt", "price", "vol"]))
+    if "L2" in levels:
+        checked.append(check("L2", dec["L2"], [g2_side, g2_op, g2_pos, g2_price, g2_vol],
+                             ["side", "op", "pos", "price", "vol"]))
+    all_ok = bool(checked) and all(c["ok"] for c in checked)
+    return {"status": "validated" if all_ok else "gate_failed", "engine": "offline",
+            "checked": checked,
+            "note": "ts is UTC (offline) vs ET (NT8 CSV) by design — fields compared, ts not"}
+
+
 def run_histdump(*, instrument_glob: str, out_dir, replay_dir=None, mode: str = "depth",
                  force: bool = False, validate_only: bool = False, parquet: bool = False,
-                 timeout: float = 300.0) -> dict:
+                 timeout: float = 300.0, engine: str = "offline",
+                 levels=("L1", "L2"), validate: bool = False) -> dict:
     out_dir = Path(out_dir)
     replay_dir = Path(replay_dir) if replay_dir else (ntio.nt8_root() / "db" / "replay")
+
+    if engine == "offline":
+        if validate:
+            return _validate_offline(instrument_glob=instrument_glob, replay_dir=replay_dir,
+                                     levels=list(levels), timeout=timeout)
+        return _run_offline(instrument_glob=instrument_glob, out_dir=out_dir,
+                            replay_dir=replay_dir, levels=list(levels), force=force)
 
     gate = _validation_gate(replay_dir, instrument_glob, out_dir, mode, timeout)
     if not gate["ok"]:

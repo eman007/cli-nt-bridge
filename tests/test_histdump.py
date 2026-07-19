@@ -47,7 +47,7 @@ def test_run_histdump_gate_pass_and_export(tmp_path, monkeypatch):
         Path(out_path).write_text("L2;1;x\n")
         return {"status": "ok", "rows": 1, "outPath": out_path}
     monkeypatch.setattr(histdump, "dump_one", fake_dump)
-    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out, replay_dir=replay)
+    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out, replay_dir=replay, engine="nt8")
     assert res["status"] == "ok"
     assert res["gate"]["ok"] is True
     assert res["exported"] == ["MNQ 03-25/20241202"]          # only the missing date
@@ -61,7 +61,7 @@ def test_run_histdump_gate_fail_aborts(tmp_path, monkeypatch):
         Path(out_path).write_text("L2;1;DIFFERENT\n")            # mismatch vs existing
         return {"status": "ok", "rows": 1, "outPath": out_path}
     monkeypatch.setattr(histdump, "dump_one", fake_dump)
-    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out, replay_dir=replay)
+    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out, replay_dir=replay, engine="nt8")
     assert res["status"] == "gate_failed"
     assert res["gate"]["ok"] is False
     assert not (out / "MNQ 03-25" / "20241202.csv").exists()     # nothing written on abort
@@ -74,7 +74,7 @@ def test_run_histdump_records_failures(tmp_path, monkeypatch):
             Path(out_path).write_text("L2;1;x\n"); return {"status": "ok", "rows": 1}
         return {"status": "error", "error": "no replay data"}    # the export date: fail
     monkeypatch.setattr(histdump, "dump_one", fake_dump)
-    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out, replay_dir=replay)
+    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out, replay_dir=replay, engine="nt8")
     assert res["exported"] == []
     assert res["failed"] == [{"file": "MNQ 03-25/20241202", "error": "no replay data"}]
 
@@ -108,10 +108,10 @@ def test_run_histdump_gate_skipped_reports_distinctly(tmp_path, monkeypatch):
     monkeypatch.setattr(histdump, "dump_one", fake_dump)
 
     # --validate-only on a fresh dir must NOT claim "validated" (it validated nothing)
-    v = histdump.run_histdump(instrument_glob="GC*", out_dir=out, replay_dir=replay, validate_only=True)
+    v = histdump.run_histdump(instrument_glob="GC*", out_dir=out, replay_dir=replay, validate_only=True, engine="nt8")
     assert v["status"] == "gate_skipped" and v["gate"]["skipped"] is True
     # a real run proceeds but flags the skip loudly
-    r = histdump.run_histdump(instrument_glob="GC*", out_dir=out, replay_dir=replay)
+    r = histdump.run_histdump(instrument_glob="GC*", out_dir=out, replay_dir=replay, engine="nt8")
     assert r["status"] == "ok" and r["exported"] == ["GC 02-26/20260101"]
     assert any("gate SKIPPED" in w for w in r.get("warnings", []))
 
@@ -125,7 +125,7 @@ def test_run_histdump_empty_dump_is_failure_not_silent_gap(tmp_path, monkeypatch
         Path(out_path).write_text("")                             # export: empty file, no exception
         return {"status": "ok", "rows": 0}
     monkeypatch.setattr(histdump, "dump_one", fake_dump)
-    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out, replay_dir=replay)
+    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out, replay_dir=replay, engine="nt8")
     assert res["exported"] == []
     assert res["failed"] == [{"file": "MNQ 03-25/20241202", "error": "empty output"}]
     assert not (out / "MNQ 03-25" / "20241202.csv").exists()      # NOT written -> re-attemptable
@@ -139,7 +139,7 @@ def test_run_histdump_timeout_is_recorded_not_fatal(tmp_path, monkeypatch):
             Path(out_path).write_text("L2;1;x\n"); return {"status": "ok", "rows": 1}
         raise TimeoutError("no result within 300s")
     monkeypatch.setattr(histdump, "dump_one", fake_dump)
-    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out, replay_dir=replay)
+    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out, replay_dir=replay, engine="nt8")
     assert res["status"] == "ok" and res["exported"] == []       # batch survives one date's timeout
     assert res["failed"][0]["file"] == "MNQ 03-25/20241202"
     assert "timeout" in res["failed"][0]["error"]

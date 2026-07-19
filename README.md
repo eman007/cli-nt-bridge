@@ -36,7 +36,7 @@ git clone git@github.com:eman007/cli-nt-bridge.git
 cd cli-nt-bridge
 python -m venv .venv
 .venv\Scripts\Activate.ps1                  # PowerShell: activate the venv for this shell
-python -m pip install -e ".[dev,report]"    # add ,parquet for histdump's --parquet output
+python -m pip install -e ".[dev,report]"    # numpy+pyarrow are base deps; report adds matplotlib for --pdf
 ```
 
 Every command below assumes the venv is **active** — you'll see `(.venv)` in your prompt. If activation is inconvenient or PowerShell blocks the activate script, prefix every command with the venv's Python instead: `.venv\Scripts\python -m nt8bridge …`
@@ -92,7 +92,7 @@ configure      write instrument/dates/bar-type/fill/params onto the SA tab (head
 **Data export**
 ```
 histget       download missing MarketReplay .nrd files for a date range
-histdump      batch-export replay .nrd -> depth CSV (+ optional parquet), NRDToCSV-faithful
+histdump      offline .nrd -> L1/L2 UTC parquet (default, no NinjaTrader; --nt8 for legacy CSV)
 ```
 
 **Live ops & recovery** (out-of-band; keeps working when a strategy's own feed stalls)
@@ -168,7 +168,7 @@ Automate the SA tab so a sweep needs no manual clicking:
 ### histget & histdump — replay data export
 
 - `histget --instrument 'MNQ 09-26' --from 20260706 --to 20260709` — downloads the missing MarketReplay `.nrd` files for a date range (drives NT8's own `RequestMarketReplay` per date; skips weekends and dates already present).
-- `histdump --instrument 'MNQ*' --out ./out/MNQ_TICK` — batch-exports the replay `.nrd` to per-day depth **CSV** (byte-identical to the in-NT8 `NRDToCSV` full-depth mode), auto-discovering missing dates. Add `--parquet` for a compact columnar copy (needs the `parquet` extra), `--validate-only` to check byte-equivalence against an existing CSV without writing, `--force` to overwrite.
+- `histdump --instrument 'MNQ*' --out ./out/PARQUET` — **offline by default**: decodes the replay `.nrd` binary directly to per-day **L1 + L2 UTC parquet** (`<out>/<SEASON>/<SYM>-<SEASON>_<L1|L2>/<date>.parquet`), **no NinjaTrader**, ~3× faster than driving NT8, and verified byte-exact against NT8's own `DumpMarketDepth`. Truncated `.nrd` are salvaged cleanly (every valid row, no garbage tail). `--validate` re-checks a decode against a fresh NT8 dump; `--nt8` uses the legacy CSV engine (needs NinjaTrader); `--levels L1 L2` and `--force` as expected.
 
 The CSV is always the source of truth; parquet is opt-in and never replaces it. A byte-equivalence gate catches any NT8-side format drift before a batch write.
 
@@ -259,7 +259,7 @@ python -m nt8bridge peek                                   # re-read the result 
 
 - **Compile:** the AddOn calls `NinjaTrader.Code.Compiler.Compile(...)` (a public static method in `NinjaTrader.Core.dll`) via reflection and reads the returned Roslyn `EmitResult.Diagnostics`. No UI scraping.
 - **Backtest:** it locates the open Strategy Analyzer window via `NinjaTrader.Core.Globals.AllWindows`, reads its `StrategyAnalyzerViewModel`, injects params onto the configured `StrategyTemplate`, and **executes the Run `RoutedCommand`** — exactly what the Run button does, so NinjaTrader runs it correctly on a background thread. Do **not** call `StrategyRunner.RunStrategyAsync` directly: on the SA UI thread it deadlocks and crashes NinjaTrader.
-- **Data export:** `histdump` drives NinjaTrader's own `MarketReplay.DumpMarketDepth` — NinjaTrader does the `.nrd` decode, so the output is byte-identical by construction; the bridge never parses the binary itself.
+- **Data export:** `histdump` decodes the `.nrd` binary **offline** (a 44-slot header + a variable-length event stream) straight to L1/L2 parquet — verified byte-exact against NT8's `MarketReplay.DumpMarketDepth`, which `--nt8` still drives for the legacy CSV path.
 - **Live reads:** `account`, `performance`, `feedhealth` use public NT8 APIs; `perfwindow` and `chartseries` read non-public view-model / chart internals via reflection.
 
 These reach into NinjaTrader's non-public internals, so they may need adjusting across NinjaTrader versions. The bridge is built to fail **loud** where it can (a moved type fails at compile/deploy time), and the two commands that read non-public members defensively — `perfwindow` (via its `feesCalculated` flag) and `chartseries` (fail-closed) — tell you when they can't trust what they read rather than returning a wrong answer.

@@ -52,7 +52,7 @@ Commands:
   python -m nt8bridge probe                      dump tab/tabStrategyProperties/template props (discover names)
   python -m nt8bridge configure --config c.json  set instrument/dates/bar type/fill/params on the SA tab
   python -m nt8bridge chartseries --instrument 'MES 09-26' --bars-type Minute --bars-value 5  change a LIVE chart's data series
-  python -m nt8bridge histdump --instrument 'MNQ*' --out ./out/MNQ_TICK  batch-export replay depth CSVs (NRDToCSV-faithful; --parquet/--validate-only/--force)
+  python -m nt8bridge histdump --instrument 'MNQ*' --out ./out/PARQUET  offline .nrd -> L1/L2 UTC parquet (default, no NinjaTrader; --nt8 for legacy CSV)
   python -m nt8bridge histget  --instrument 'MNQ 09-26' --from 20260706 --to 20260709  download missing MarketReplay .nrd (RequestMarketReplay per date)
   python -m nt8bridge flatten  --name Sim101 force-close positions + cancel orders (kill switch)
   python -m nt8bridge watch    --name Sim101 auto-flatten NAKED positions (loop)
@@ -315,6 +315,9 @@ def _histdump(args) -> int:
             instrument_glob=args.instrument,
             out_dir=args.out,
             replay_dir=args.replay_dir or None,
+            engine="nt8" if args.nt8 else "offline",
+            levels=tuple(args.levels),
+            validate=args.validate,
             mode=args.mode,
             parquet=args.parquet,
             force=args.force,
@@ -603,7 +606,10 @@ def main(argv: list[str]) -> int:
     p_hd.add_argument("--mode", default="depth", choices=["depth"], help="export mode (v1: depth only)")
     p_hd.add_argument("--parquet", action="store_true", help="also write a parquet beside each CSV")
     p_hd.add_argument("--force", action="store_true", help="re-export dates that already have a CSV")
-    p_hd.add_argument("--validate-only", dest="validate_only", action="store_true", help="run the equivalence gate and stop")
+    p_hd.add_argument("--validate-only", dest="validate_only", action="store_true", help="(--nt8) run the CSV equivalence gate and stop")
+    p_hd.add_argument("--nt8", action="store_true", help="use the legacy NT8 DumpMarketDepth CSV engine (needs NinjaTrader)")
+    p_hd.add_argument("--levels", nargs="+", choices=["L1", "L2"], default=["L1", "L2"], help="offline: record levels to write (default both)")
+    p_hd.add_argument("--validate", action="store_true", help="offline: decode + diff vs a fresh NT8 dump (needs NinjaTrader); writes nothing")
     p_hd.add_argument("--timeout", type=float, default=300.0, help="seconds per date export")
 
     p_hg = sub.add_parser("histget")

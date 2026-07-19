@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-07-19
+
+### Added
+
+- **Offline `histdump` engine — now the default.** `histdump` decodes NinjaTrader `.nrd`
+  MarketReplay files **directly, with no running NinjaTrader**, straight to per-day **L1 + L2
+  UTC parquet** at `<out>/<SEASON>/<SYM>-<SEASON>_<L1|L2>/<date>.parquet`. Verified byte-exact
+  against NT8's own `MarketReplay.DumpMarketDepth` across MNQ (0.25 tick) and MGC (0.10 tick),
+  ~20 days / tens of millions of events, and ~3× faster than driving NT8.
+  - **Clean salvage** of truncated `.nrd`: every valid record is written and the incomplete
+    final record is dropped (the NT8 engine instead emits one garbage trailing row).
+  - `--validate` — decode a `.nrd` and diff every field against a fresh NT8 dump (needs NT8).
+  - `--nt8` — the previous `DumpMarketDepth` CSV engine, kept as a legacy fallback for damaged
+    files (needs NinjaTrader). `--levels L1 L2` selects which record levels to write.
+
+### Changed
+
+- `histdump`'s default output is now L1/L2 UTC parquet (offline); the old full-depth CSV is
+  produced by `--nt8`.
+- `numpy` and `pyarrow` are now required dependencies (the default offline engine needs them).
+
 ## [1.0.0] - 2026-07-18
 
 First full public release — the toolset grows from 13 to 24 commands. Verified against
