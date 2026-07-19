@@ -34,3 +34,37 @@ def test_run_histget_skips_saturdays_and_existing(monkeypatch, tmp_path):
     # count matches the downloaded list.
     assert out["count"] == len(out["downloaded"])
     assert out["instrument"] == inst
+
+
+def test_run_histget_excludes_current_and_future_day(monkeypatch, tmp_path):
+    called = []
+
+    def fake(instrument, ds, timeout=600.0):
+        called.append(ds)
+        return {"status": "ok", "exists": True}
+
+    monkeypatch.setattr(histget, "download_one", fake)
+    inst = "MNQ 09-26"
+    (tmp_path / inst).mkdir(parents=True)
+    out = histget.run_histget(instrument=inst, from_date="20260713", to_date="20260716",
+                              replay_dir=tmp_path, today=date(2026, 7, 15))
+    assert out["today"] == "20260715"
+    # today (15, partial) and the future date (16) are never attempted
+    assert set(out["skipped_current"]) == {"20260715", "20260716"}
+    assert all(ds < "20260715" for ds in called)
+
+
+def test_histget_cli_force_disables_skip(monkeypatch):
+    from nt8bridge import cli
+    seen = {}
+
+    def fake(**kw):
+        seen.update(kw)
+        return {"status": "ok", "downloaded": [], "skipped": [],
+                "skipped_current": [], "failed": [], "count": 0}
+
+    monkeypatch.setattr(cli.nthistget, "run_histget", fake)
+    cli.main(["histget", "--instrument", "MNQ 09-26", "--from", "20260101", "--to", "20260102"])
+    assert seen["skip_existing"] is True
+    cli.main(["histget", "--instrument", "MNQ 09-26", "--from", "20260101", "--to", "20260102", "--force"])
+    assert seen["skip_existing"] is False

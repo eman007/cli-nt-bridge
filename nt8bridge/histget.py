@@ -3,13 +3,15 @@
 The AddOn drives NT8's own RequestMarketReplay(instrument, dateEst, callback, ...) per date
 (the same reflection path as the community MultidayReplayDownloader), writing
 db/replay/<instrument>/<yyyyMMdd>.nrd. This client loops a date range, skips Saturdays (no
-session) and — by default — dates whose .nrd already exists, so it's cheap to re-run. Pair with
-`histdump` to then convert the freshly-downloaded .nrd to CSV/parquet."""
+session), the CURRENT/future day (its replay is only partial until the session closes and NT8
+processes it), and — by default — dates whose .nrd already exists, so it's cheap to re-run.
+Pair with `histdump` to then convert the freshly-downloaded .nrd to CSV/parquet."""
 from __future__ import annotations
 
 import uuid
-from datetime import date as _date, timedelta
+from datetime import date as _date, datetime as _datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from nt8bridge import ntio
 
@@ -38,18 +40,31 @@ def _iter_dates(from_str: str, to_str: str):
 
 
 def run_histget(*, instrument: str, from_date: str, to_date: str, skip_existing: bool = True,
-                replay_dir=None, timeout: float = 600.0) -> dict:
-    """Download each session date in [from_date, to_date] (YYYYMMDD) for one instrument."""
+                replay_dir=None, timeout: float = 600.0, today=None) -> dict:
+    """Download each session date in [from_date, to_date] (YYYYMMDD, ET) for one instrument.
+
+    The CURRENT day and any future date are never downloaded — their replay data is only partial
+    until the session closes and NT8 processes it — so the effective latest date is yesterday.
+    `today` is the cutoff (a datetime.date, exclusive); it defaults to the current ET date
+    (America/New_York — matching NT8's ET session dates regardless of the machine's own timezone,
+    e.g. a PST box in the evening is already the next ET day) and is injectable for tests. With
+    `skip_existing=False` (the CLI `--force`), dates that already have a .nrd are re-downloaded and
+    overwritten."""
+    today = today or _datetime.now(ZoneInfo("America/New_York")).date()
     replay_dir = Path(replay_dir) if replay_dir else (ntio.nt8_root() / "db" / "replay")
     inst_dir = replay_dir / instrument
     downloaded: list[str] = []
     skipped: list[str] = []
+    skipped_current: list[str] = []
     failed: list[dict] = []
 
     for d in _iter_dates(from_date, to_date):
+        ds = d.strftime("%Y%m%d")
+        if d >= today:                  # current/future day -> partial data, never download
+            skipped_current.append(ds)
+            continue
         if d.weekday() == 5:            # Saturday — no session data
             continue
-        ds = d.strftime("%Y%m%d")
         nrd = inst_dir / f"{ds}.nrd"
         if skip_existing and nrd.exists():
             skipped.append(ds)
@@ -65,5 +80,7 @@ def run_histget(*, instrument: str, from_date: str, to_date: str, skip_existing:
             failed.append({"date": ds, "error": res.get("error") or res.get("message") or "download failed"})
 
     return {"status": "ok", "instrument": instrument, "from": from_date, "to": to_date,
-            "downloaded": downloaded, "skipped": skipped, "failed": failed,
+            "today": today.strftime("%Y%m%d"),
+            "downloaded": downloaded, "skipped": skipped,
+            "skipped_current": skipped_current, "failed": failed,
             "count": len(downloaded)}

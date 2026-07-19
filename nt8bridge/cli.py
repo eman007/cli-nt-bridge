@@ -339,7 +339,7 @@ def _histget(args) -> int:
             instrument=args.instrument,
             from_date=args.from_,
             to_date=args.to,
-            skip_existing=not args.no_skip_existing,
+            skip_existing=not (args.no_skip_existing or args.force),
             replay_dir=args.replay_dir or None,
             timeout=args.timeout,
         )
@@ -617,6 +617,7 @@ def main(argv: list[str]) -> int:
     p_hg.add_argument("--from", dest="from_", required=True, help="start date YYYYMMDD (ET)")
     p_hg.add_argument("--to", required=True, help="end date YYYYMMDD inclusive (ET)")
     p_hg.add_argument("--no-skip-existing", dest="no_skip_existing", action="store_true", help="re-download dates that already have a .nrd")
+    p_hg.add_argument("--force", action="store_true", help="force re-download + overwrite dates that already have a .nrd (alias of --no-skip-existing)")
     p_hg.add_argument("--replay-dir", dest="replay_dir", default="", help="db/replay dir (default: <NT8>/db/replay)")
     p_hg.add_argument("--timeout", type=float, default=600.0, help="AddOn wait per date, seconds (heavy MNQ days run 300-460s)")
 

@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-07-19
+
+### Fixed / Added
+
+- `histget` **never downloads the current or future day** — replay data is only partial until the
+  session closes, so the effective latest date is yesterday. The cutoff is computed in **ET**
+  (`America/New_York`, DST-correct) to match NT8's session dates regardless of the machine's own
+  timezone; the result reports `today` and `skipped_current[]`.
+- `histget --force` re-downloads and overwrites dates that already have a `.nrd` (alias of the
+  existing `--no-skip-existing`).
+- `tzdata` added to dependencies (Windows has no system tz database, needed to resolve ET).
+
 ## [1.1.0] - 2026-07-19
 
 ### Added
