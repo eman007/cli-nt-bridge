@@ -1,14 +1,14 @@
 """Account watchdog: detect NAKED (unprotected) positions and force-close them.
 
-An automated strategy can leave a position stranded without a protective stop (it
-stops managing the position, or never places the bracket). This is an INDEPENDENT,
-out-of-band safety loop: read account state -> for each WATCHED account, for each
-open position, check whether a protective STOP order exists; if a position stays
-naked past the grace period, flatten it and log WHY.
+Automated strategies do not always reliably close a stranded position (e.g. losing
+track of a flipped short entirely). This is an INDEPENDENT, out-of-band safety
+loop: read account state -> for each WATCHED account, for each open position,
+check whether a protective STOP order exists; if a position stays naked past the
+grace period, flatten it and log WHY.
 
 Safety guards:
-- Scoped to an explicit `accounts` allow-list — never touches positions on accounts
-  you didn't name (other systems are left alone).
+- Scoped to an explicit `accounts` allow-list — never touches positions on
+  accounts that are not on the list.
 - Grace period before killing — a freshly-entered position has a moment before
   its bracket lands; the watchdog must NOT kill a trade mid-bracket-placement.
 - Protection = a working STOP order for the position's instrument (a lone

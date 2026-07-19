@@ -1,8 +1,8 @@
 """Force-close half of the IPC contract (request builder + runner).
 
 Flattens an account's position(s) and cancels its working orders via the in-NT8
-AddOn. An independent kill switch for a stranded/naked position a strategy has
-lost track of — a separate transport from whatever status feed the strategy uses.
+AddOn. The independent kill switch for a stranded/naked position your automation
+has lost track of — a transport separate from whatever feeds your strategy.
 
 JSON contract (the in-NT8 AddOn honors):
   request : {"id": str, "kind": "flatten", "account": str, "instrument": str|""}

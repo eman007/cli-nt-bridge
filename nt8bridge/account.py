@@ -3,11 +3,11 @@
 An independent, out-of-band read of NinjaTrader's own Account objects: open
 positions, working orders, realized/unrealized P&L, and recent completed trades.
 
-This is a SEPARATE transport from any status/position feed a strategy publishes
-(a ZMQ or socket channel, say). When such a feed stalls — e.g. a closed trade
-recorded as a $0 placeholder because the strategy stopped pushing position
-updates — this reader still answers the load-bearing questions directly from
-NT8's truth: is a position actually open, and what was a trade's real fill?
+This is a SEPARATE transport from whatever automation feeds your strategy. When an
+upstream status/position substream stalls (e.g. NT8 stops pushing position updates and
+a winning trade gets recorded as a $0 placeholder), this reader still answers the
+load-bearing questions directly from NT8's truth: is a position actually open, and what
+was a trade's real fill?
 
 JSON contract (the in-NT8 AddOn must honor):
   request : {"id": str, "kind": "account", "account": str|""}   # ""=all accounts
@@ -56,7 +56,7 @@ def parse_account_response(payload: dict) -> AccountState:
 def run_account_state(account: str = "", timeout: float = 15.0) -> dict:
     """Drop an account-state request for the in-NT8 AddOn and wait for its result.
 
-    `account` filters to one account by name (e.g. "SimAccount2"); empty = all
+    `account` filters to one account by name (e.g. "Sim101"); empty = all
     accounts. Returns the raw response payload. Raises TimeoutError if the AddOn
     does not respond — which itself is diagnostic: NT8 is down, or the
     NT8BridgeServer AddOn is not loaded/compiled.

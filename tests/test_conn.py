@@ -118,17 +118,60 @@ def test_inadvertent_within_grace_then_reconnected_after_grace():
     assert events[0]["reason"] == "inadvertent drop past grace period"
 
 
-def test_connwatch_gives_up_and_surfaces_after_max_attempts():
+def test_connwatch_cools_down_then_retries_after_max_attempts():
+    """MED-1b: after max_attempts failures it COOLS DOWN (not a permanent give-up), then
+    resets and retries once the cooldown elapses — so a session-critical feed keeps being
+    healed (e.g. after an expired token is refreshed)."""
     flagged = [{"name": "X", "inadvertentlyDropped": True}]
-    times = [0.0, 20.0, 60.0]  # advance past each backoff so a 2nd attempt fires
+    # iter1 t=0 attempt1; iter2 t=20 attempt2 -> cooldown(1000) until 1020;
+    # iter3 t=200 still cooling; iter4 t=5000 cooldown elapsed -> reset -> attempt3.
+    times = [0.0, 20.0, 200.0, 5000.0]
     events = connwatch.watch(
-        ["X"], grace_seconds=0.0, max_attempts=2, max_iterations=3,
+        ["X"], grace_seconds=0.0, max_attempts=2, max_iterations=4, cooldown_seconds=1000.0,
         _scan=lambda allow: flagged,
         _reconnect=lambda name: {"status": "ok", "statusAfter": "ConnectionLost"},  # never goes green
-        _sleep=lambda s: None, _now=lambda: (times.pop(0) if times else 100.0), _log=lambda e: None,
+        _sleep=lambda s: None, _now=lambda: (times.pop(0) if times else 99999.0),
+        _log=lambda e: None, _rng=lambda: 0.5,
     )
-    assert len(events) == 2  # capped at max_attempts
-    assert events[-1].get("giving_up") is True
+    attempts = [e for e in events if e.get("attempt")]
+    assert len(attempts) == 3  # 2 before cooldown + 1 after -> NOT a permanent give-up
+    assert any(e.get("cooling_down") for e in events)
+    assert not any(e.get("giving_up") for e in events)  # permanent give-up replaced by cooldown
+
+
+def test_connecting_status_does_not_burn_the_attempt_budget():
+    """MED-1a: a slow reconnect that reads 'Connecting' is in-progress, not a failed attempt,
+    so the guardian never falsely gives up on a connection that is actually coming back."""
+    flagged = [{"name": "X", "inadvertentlyDropped": True}]
+    times = iter([0.0, 20.0, 40.0, 60.0, 80.0, 100.0])
+    events = connwatch.watch(
+        ["X"], grace_seconds=0.0, max_attempts=2, max_iterations=5,
+        connecting_recheck=5.0, max_connecting_rechecks=10,
+        _scan=lambda allow: flagged,
+        _reconnect=lambda name: {"status": "ok", "statusAfter": "Connecting"},
+        _sleep=lambda s: None, _now=lambda: next(times), _log=lambda e: None, _rng=lambda: 0.5,
+    )
+    assert events and all(e.get("in_progress") for e in events)   # every result was an in-progress recheck
+    assert not any(e.get("attempt") for e in events)              # zero failed attempts counted
+    assert not any(e.get("cooling_down") or e.get("giving_up") for e in events)
+
+
+def test_persistent_connecting_eventually_escalates_to_a_real_attempt():
+    """MED-1a bound: if 'Connecting' never settles, after max_connecting_rechecks it is
+    escalated to a real failed attempt, so a permanently-stuck connect still surfaces."""
+    flagged = [{"name": "X", "inadvertentlyDropped": True}]
+    t = [0.0]
+    def now():
+        v = t[0]; t[0] += 50.0; return v
+    events = connwatch.watch(
+        ["X"], grace_seconds=0.0, max_attempts=5, max_iterations=8,
+        connecting_recheck=5.0, max_connecting_rechecks=2,
+        _scan=lambda allow: flagged,
+        _reconnect=lambda name: {"status": "ok", "statusAfter": "Connecting"},
+        _sleep=lambda s: None, _now=now, _log=lambda e: None, _rng=lambda: 0.5,
+    )
+    assert any(e.get("in_progress") for e in events)   # rechecked while connecting
+    assert any(e.get("attempt") for e in events)        # then escalated to a real attempt
 
 
 def test_backoff_grows_and_caps():
@@ -136,6 +179,15 @@ def test_backoff_grows_and_caps():
     assert connwatch._backoff_seconds(2) == 30.0
     assert connwatch._backoff_seconds(3) == 60.0
     assert connwatch._backoff_seconds(99) == 300.0  # capped
+
+
+def test_backoff_jitter_is_deterministic_with_injected_rng():
+    """LOW-3: optional +/- jitter so connections that drop together don't retry in lockstep.
+    Off by default (jitter_frac=0.0); rng()=0.5 is the no-change midpoint."""
+    assert connwatch._backoff_seconds(2, jitter_frac=0.0) == 30.0
+    assert connwatch._backoff_seconds(2, jitter_frac=0.1, rng=lambda: 0.5) == 30.0
+    assert connwatch._backoff_seconds(2, jitter_frac=0.1, rng=lambda: 1.0) == 30.0 * 1.1
+    assert connwatch._backoff_seconds(2, jitter_frac=0.1, rng=lambda: 0.0) == 30.0 * 0.9
 
 
 # ---- CLI wiring ----

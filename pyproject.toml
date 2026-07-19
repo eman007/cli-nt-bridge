@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nt8bridge"
-version = "0.1.0"
+version = "1.0.0"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = ["jsonschema>=4"]
@@ -12,6 +12,7 @@ dependencies = ["jsonschema>=4"]
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 report = ["matplotlib>=3"]
+parquet = ["pyarrow>=14"]
 
 [tool.setuptools.packages.find]
 include = ["nt8bridge*"]
