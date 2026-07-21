@@ -4,6 +4,33 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `compile --type` is now **optional**. NinjaTrader's compiler always builds the whole tree (the
+  AddOn never read `typeName`), so requiring the flag forced every caller — especially scripted and
+  agent-driven ones — to invent a meaningless argument, and a bare `compile` exited 2. Still
+  accepted, and documented as ignored.
+- `compile --timeout` default raised **30s → 120s**. A real tree compiles slower than 30s, so the
+  old default reported `{"status":"timeout"}` for a perfectly healthy compile that NinjaTrader was
+  still running.
+- A `compile` timeout now carries a `hint` distinguishing "NinjaTrader is still compiling" from
+  "the AddOn isn't loaded", instead of leaving the caller to guess which failure it hit.
+
+### Documentation
+
+- New README section **"What actually loads your code"**: `compile` validates only
+  (`checkCompileOnly=true` ⇒ `assemblyReloaded` is always `false`), but writing a `.cs` into
+  `bin\Custom` while NinjaTrader is running makes NinjaTrader recompile and **hot-reload the
+  assembly on its own** — so `deploy` is not an inert file copy (measured: DLL rebuilt ~19s after
+  the write, on 8.1.7.2). Documents the two consequences: the reload happens underneath whatever is
+  running, and it does **not** close already-open AddOn windows — the old window keeps executing the
+  old assembly while the new assembly's statics start empty, so an AddOn that auto-opens a window
+  can stack a second instance on a live one. Neither statics nor `Type` identity can detect that;
+  the interlock has to live in an artifact that crosses the reload boundary. Bars types are the
+  exception (sticky instance — still need F5 + a chart reload).
+
 ## [1.1.1] - 2026-07-19
 
 ### Fixed / Added
