@@ -96,8 +96,28 @@ def test_compile_subcommand_ok(monkeypatch, capsys):
     assert payload["ok"] is True
 
 
+def test_compile_subcommand_without_type(monkeypatch, capsys):
+    """NT compiles the whole tree, so --type is optional (and ignored)."""
+    from nt8bridge.compile import CompileResult
+
+    seen = {}
+
+    def fake(type_name, timeout=120.0):
+        seen["type_name"] = type_name
+        seen["timeout"] = timeout
+        return CompileResult(ok=True)
+
+    monkeypatch.setattr(cli.ntcompile, "run_compile", fake)
+    rc = cli.main(["compile"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["ok"] is True
+    assert seen["type_name"] == ""
+    assert seen["timeout"] == 120.0  # a real tree needs more than the old 30s
+
+
 def test_compile_subcommand_timeout(monkeypatch, capsys):
-    def boom(t, timeout=30.0):
+    def boom(t, timeout=120.0):
         raise TimeoutError("no result from AddOn")
 
     monkeypatch.setattr(cli.ntcompile, "run_compile", boom)
@@ -105,6 +125,7 @@ def test_compile_subcommand_timeout(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert rc == 1
     assert payload["status"] == "timeout"
+    assert "hint" in payload  # a timeout must not read as "your code is broken"
 
 
 def test_batch_subcommand_ok(monkeypatch, tmp_path, capsys):

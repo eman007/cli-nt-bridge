@@ -41,7 +41,7 @@ Commands:
   python -m nt8bridge doctor                 check preconditions
   python -m nt8bridge precheck --strategy X.cs   offline compile (no NT8)
   python -m nt8bridge deploy   --strategy X.cs   atomic cp into bin/Custom
-  python -m nt8bridge compile  --type MyStrategy in-process compile (needs AddOn)
+  python -m nt8bridge compile                    in-process compile (needs AddOn)
   python -m nt8bridge backtest --config c.json   auto backtest in NT8 (--pdf for report)
   python -m nt8bridge batch    --batch b.json    run N param-sets -> combined report (--pdf)
   python -m nt8bridge sweep    --config c.json --instruments 'MNQ 09-26,MES 09-26' --bars 'Minute:1,Minute:5'  backtest matrix (--pdf)
@@ -132,7 +132,19 @@ def _compile(type_name: str, timeout: float) -> int:
     except TimeoutError as e:
         print(
             json.dumps(
-                {"command": "compile", "status": "timeout", "ok": False, "message": str(e)},
+                {
+                    "command": "compile",
+                    "status": "timeout",
+                    "ok": False,
+                    "message": str(e),
+                    # A timeout is NOT proof of a broken bridge: NinjaTrader may still be
+                    # compiling. Say so, so a caller does not read it as a failed compile.
+                    "hint": (
+                        "no result within the timeout -- NinjaTrader may still be compiling "
+                        "a large tree. Run `doctor` to tell 'AddOn not loaded' apart from "
+                        "'slow compile', or retry with a longer --timeout."
+                    ),
+                },
                 indent=2,
             )
         )
@@ -513,8 +525,16 @@ def main(argv: list[str]) -> int:
     p_dep.add_argument("--strategy", required=True)
     p_dep.add_argument("--kind", default="strategy")
     p_com = sub.add_parser("compile")
-    p_com.add_argument("--type", required=True)
-    p_com.add_argument("--timeout", type=float, default=30.0)
+    # NT's compiler always builds the WHOLE tree (same as F5), so there is nothing
+    # for --type to scope; the AddOn never reads it. Kept accepted for back-compat.
+    p_com.add_argument(
+        "--type",
+        default="",
+        help="accepted for back-compat and ignored — NT compiles the whole tree",
+    )
+    # A real tree can take well over 30s to compile; the old default turned a healthy
+    # compile into a spurious "timeout".
+    p_com.add_argument("--timeout", type=float, default=120.0)
     p_bt = sub.add_parser("backtest")
     p_bt.add_argument("--config", required=True)
     p_bt.add_argument("--timeout", type=float, default=120.0)
