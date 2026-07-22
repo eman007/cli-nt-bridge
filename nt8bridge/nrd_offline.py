@@ -65,8 +65,42 @@ def parse_headers(head: bytes):
     for s in range(N_SLOTS):
         (last, cnt, pmax, pmin, pfirst, _one, ticksz, _flag,
          t0, t1, volsum) = HDR.unpack_from(head, s * 80)
-        slots.append(dict(count=cnt, first=pfirst, tick=ticksz, t0=t0, t1=t1))
+        slots.append(dict(count=cnt, first=pfirst, tick=ticksz, t0=t0, t1=t1,
+                          pmax=pmax, pmin=pmin, volsum=volsum))
     return slots
+
+
+def _integrity_errors(slots, out) -> list:
+    """Cross-check the decoded events against the header's OWN per-slot volume-sum and price
+    range. A clean .nrd matches exactly (validated across every symbol/size); a corrupt one
+    diverges — byte damage usually stays in-format and would otherwise decode to SILENTLY-WRONG
+    data. Returns a list of mismatch strings ([] = clean). Not meaningful on a truncated file
+    (its decoded prefix legitimately holds less than the header totals), so callers skip it there."""
+    errs = []
+    if "L1" in out:
+        _, mdt, price, vol = out["L1"]
+        for k in range(10):
+            s = slots[k]
+            if not s["count"]:
+                continue
+            m = mdt == k
+            if not m.any():
+                continue
+            dv = int(vol[m].sum())
+            if dv != int(s["volsum"]):
+                errs.append(f"L1[{k}] volume {dv} != header {int(s['volsum'])}")
+            if float(price[m].min()) < s["pmin"] - 1e-6 or float(price[m].max()) > s["pmax"] + 1e-6:
+                errs.append(f"L1[{k}] price outside header range [{s['pmin']}, {s['pmax']}]")
+    if "L2" in out:
+        _, side, _, _, _, vol2 = out["L2"]
+        for k, sd in ((10, 0), (11, 1)):
+            s = slots[k]
+            if not s["count"]:
+                continue
+            dv = int(vol2[side == sd].sum())
+            if dv != int(s["volsum"]):
+                errs.append(f"L2[side{sd}] volume {dv} != header {int(s['volsum'])}")
+    return errs
 
 
 def _price_decimals(tick: float) -> int:
@@ -86,7 +120,7 @@ class _Trunc(Exception):
 
 
 def decode(buf: bytes, slots, want_l1: bool = True, want_l2: bool = True,
-           salvage: bool = True) -> dict:
+           salvage: bool = True, verify: bool = True) -> dict:
     """Single-pass decode of the merged event stream.
 
     Returns {"L1": (ts_ns_utc, mdt, price, vol), "L2": (ts, side, op, pos, price, vol),
@@ -96,7 +130,7 @@ def decode(buf: bytes, slots, want_l1: bool = True, want_l2: bool = True,
     always raises FormatError, salvage or not."""
     tick = next((s["tick"] for s in slots if s["count"]), None)
     if tick is None:
-        out = {"truncated": False, "truncated_at": None}
+        out = {"truncated": False, "truncated_at": None, "integrity_ok": True, "integrity_errors": []}
         if want_l1:
             out["L1"] = (np.empty(0, "int64"), np.empty(0, "int8"),
                          np.empty(0, "float64"), np.empty(0, "int64"))
@@ -205,6 +239,10 @@ def decode(buf: bytes, slots, want_l1: bool = True, want_l2: bool = True,
     if want_l2:
         p = b_price[:k2].copy(); np.round(p, ndp, out=p)
         out["L2"] = (b_ts[:k2], b_side[:k2], b_op[:k2], b_pos[:k2], p, b_vol[:k2])
+    # Header-integrity cross-check (skip on a truncated file — its prefix legitimately falls short).
+    errs = _integrity_errors(slots, out) if (verify and not out["truncated"]) else []
+    out["integrity_ok"] = not errs
+    out["integrity_errors"] = errs
     return out
 
 

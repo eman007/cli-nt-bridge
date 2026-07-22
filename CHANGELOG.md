@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-07-22
+
+### Added
+
+- **Corrupt-`.nrd` detection.** The offline `histdump` decoder now cross-checks each decode against
+  the `.nrd` header's own per-slot volume-sum and price range. A corrupt file — byte damage that
+  would otherwise decode to **silently-wrong** data — is flagged in a `corrupt[]` bucket and **no
+  parquet is written** for that date (re-download it, e.g. `histget --force`), instead of emitting
+  silently-wrong output. Validated clean across 14/14 known-good files (3.6 MB – 263 MB, all symbols
+  and both tick sizes); truncated files are exempt (their prefix legitimately falls short).
+
 ## [1.1.1] - 2026-07-19
 
 ### Fixed / Added

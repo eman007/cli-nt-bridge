@@ -11,16 +11,19 @@ _T0 = _EPOCH_TICKS + 10_000_000_000     # EPOCH + 1000s (clean round number)
 HEADER_LEN = 44 * 80
 
 
-def _slot(count=0, first=0.0, tick=0.0, t0=0):
-    return struct.pack("<diddddd i qq q", 0.0, count, 0.0, 0.0, first, 1.0, tick, 0, t0, t0, 0)
+def _slot(count=0, first=0.0, tick=0.0, t0=0, pmin=0.0, pmax=0.0, volsum=0):
+    # struct: last, count, pmax, pmin, first, one, tick, flag, t0, t1, volsum
+    return struct.pack("<diddddd i qq q", 0.0, count, pmax, pmin, first, 1.0, tick, 0, t0, t0, volsum)
 
 
 def synthetic_nrd() -> bytes:
-    """A valid minimal .nrd: header + 2 L1 (Last) + 2 L2 (ask/bid) events."""
+    """A valid minimal .nrd: header + 2 L1 (Last) + 2 L2 (ask/bid) events.
+
+    Header volsum/price-range fields match the events so the integrity check passes clean."""
     slots = [_slot() for _ in range(44)]
-    slots[2] = _slot(10, 21800.0, 0.25, _T0)     # Last
-    slots[10] = _slot(10, 21810.0, 0.25, _T0)    # ask depth
-    slots[11] = _slot(10, 21790.0, 0.25, _T0)    # bid depth
+    slots[2] = _slot(10, 21800.0, 0.25, _T0, pmin=21800.25, pmax=21800.25, volsum=3)    # Last (vol 1+2)
+    slots[10] = _slot(10, 21810.0, 0.25, _T0, pmin=21810.0, pmax=21810.0, volsum=5)     # ask (vol 5)
+    slots[11] = _slot(10, 21790.0, 0.25, _T0, pmin=21789.5, pmax=21789.5, volsum=3)     # bid (vol 3)
     events = bytes([
         0x20, 0x4F, 0xC0, 0x01,                  # L1 Last: price +1 tick, vol 1 -> 21800.25
         0x20, 0x00, 0x00, 0x05,                  # L2 ask add pos0, vol 5 -> 21810.0

@@ -49,6 +49,27 @@ def test_l2_types_synthetic():
     assert side.dtype == np.int8 and op.dtype == np.int8 and pos.dtype == np.int32
 
 
+def test_integrity_clean_synthetic():
+    raw = H.synthetic_nrd()
+    d = N.decode(raw[H.HEADER_LEN:], N.parse_headers(raw[:H.HEADER_LEN]))
+    assert d["integrity_ok"] is True and d["integrity_errors"] == []
+
+
+def test_integrity_catches_corruption():
+    raw = bytearray(H.synthetic_nrd())
+    raw[H.HEADER_LEN + 3] = 0xFF          # corrupt the first L1 event's volume byte (1 -> 255)
+    d = N.decode(bytes(raw[H.HEADER_LEN:]), N.parse_headers(bytes(raw[:H.HEADER_LEN])))
+    assert d["integrity_ok"] is False
+    assert any("volume" in e for e in d["integrity_errors"])
+
+
+def test_integrity_skipped_when_truncated():
+    # a truncated file legitimately falls short of the header totals -> not flagged as corrupt
+    raw = H.synthetic_nrd()
+    d = N.decode(raw[H.HEADER_LEN:-1], N.parse_headers(raw[:H.HEADER_LEN]), salvage=True)
+    assert d["truncated"] is True and d["integrity_ok"] is True
+
+
 def test_season_year_dec_roll_vs_calendar():
     assert N.season_year("MNQ", "20251216") == "2026"   # quarterly: after Dec roll
     assert N.season_year("MNQ", "20251201") == "2025"   # quarterly: before Dec roll
@@ -85,3 +106,9 @@ def test_salvage_drops_only_truncated_final_record():
     assert nf - nt == 1
     assert np.array_equal(trunc["L1"][2], full["L1"][2][:len(trunc["L1"][0])])
     assert np.array_equal(trunc["L2"][4], full["L2"][4][:len(trunc["L2"][0])])
+
+
+@_real
+def test_integrity_clean_real_fixture():
+    d = N.convert_file(FIX)
+    assert d["integrity_ok"] is True and d["integrity_errors"] == []

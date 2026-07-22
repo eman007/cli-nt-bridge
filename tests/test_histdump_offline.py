@@ -52,6 +52,21 @@ def test_run_offline_levels_l1_only(tmp_path):
     assert not (out / "2024" / "MNQ-2024_L2").exists()
 
 
+def test_run_offline_flags_corrupt_and_writes_nothing(tmp_path):
+    contract = tmp_path / "replay" / "MNQ 03-25"
+    contract.mkdir(parents=True)
+    bad = bytearray(H.synthetic_nrd())
+    bad[H.HEADER_LEN + 3] = 0xFF          # corrupt the first L1 event's volume byte
+    (contract / "20241207.nrd").write_bytes(bytes(bad))
+    out = tmp_path / "parq"
+    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out,
+                                replay_dir=tmp_path / "replay", engine="offline")
+    assert res["count"] == 0
+    assert res["corrupt"] and res["corrupt"][0]["file"] == "MNQ/20241207"
+    assert res["corrupt"][0]["errors"]                       # has the mismatch detail
+    assert not (out / "2024" / "MNQ-2024_L1" / "20241207.parquet").exists()   # nothing written
+
+
 def test_histdump_cli_defaults_to_offline(monkeypatch):
     from nt8bridge import cli
     seen = {}

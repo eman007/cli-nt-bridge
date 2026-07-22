@@ -95,6 +95,7 @@ def _run_offline(*, instrument_glob, out_dir, replay_dir, levels, force):
     exported: list[str] = []
     failed: list[dict] = []
     truncated: list[dict] = []
+    corrupt: list[dict] = []
     want_l1, want_l2 = "L1" in levels, "L2" in levels
     for (sym, date), nrd in sorted(disc.items()):
         if not (force or any(not _offline_target(out_dir, sym, date, lv).exists() for lv in levels)):
@@ -104,6 +105,11 @@ def _run_offline(*, instrument_glob, out_dir, replay_dir, levels, force):
         except (N.FormatError, OSError) as e:
             # A genuinely unknown encoding / unreadable file fails this day only; run continues.
             failed.append({"file": f"{sym}/{date}", "error": str(e)})
+            continue
+        if not dec.get("integrity_ok", True):
+            # Header cross-check failed -> the .nrd is corrupt and would decode to silently-wrong
+            # data. Surface it loudly and write NOTHING (re-download the .nrd, e.g. histget --force).
+            corrupt.append({"file": f"{sym}/{date}", "errors": dec.get("integrity_errors", [])})
             continue
         if dec.get("truncated"):
             rows = (len(dec["L1"][0]) if want_l1 else 0) + (len(dec["L2"][0]) if want_l2 else 0)
@@ -117,7 +123,7 @@ def _run_offline(*, instrument_glob, out_dir, replay_dir, levels, force):
             os.replace(tmp, out)
         exported.append(f"{sym}/{date}")
     return {"status": "ok", "engine": "offline", "exported": exported,
-            "failed": failed, "truncated": truncated, "count": len(exported)}
+            "failed": failed, "truncated": truncated, "corrupt": corrupt, "count": len(exported)}
 
 
 def _validate_offline(*, instrument_glob, replay_dir, levels, timeout):
