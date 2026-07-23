@@ -60,7 +60,7 @@ With the AddOn loaded (above) and NinjaTrader running:
 ```bash
 python -m nt8bridge doctor                         # preconditions OK?
 python -m nt8bridge deploy --strategy MyStrategy.cs # copy your strategy into bin/Custom
-python -m nt8bridge compile --type MyStrategy       # compile INSIDE NT8 -> real errors as JSON
+python -m nt8bridge compile                         # compile INSIDE NT8 -> real errors as JSON
 # ...fix any errors, redeploy, recompile until clean...
 python -m nt8bridge backtest --config config/config.json --pdf report.pdf
 ```
@@ -120,6 +120,21 @@ Triggers a compile inside NinjaTrader via the AddOn and returns NinjaTrader's ow
 ```json
 { "ok": false, "errors": [ { "file": "MyStrategy.cs", "line": 42, "code": "CS0103", "message": "…" } ] }
 ```
+
+`--type` is accepted but ignored — NinjaTrader's compiler always builds the **whole tree**, exactly as F5 does, so there is nothing to scope. `compile` on its own is enough.
+
+**`compile` validates; it does not load.** The AddOn calls NinjaTrader's compiler with `checkCompileOnly=true`, so `assemblyReloaded` is always `false` — your code is *proved correct*, but the running NinjaTrader is still executing the previously loaded assembly. See below for what does load it.
+
+### What actually loads your code
+
+Writing a `.cs` into `bin\Custom` **while NinjaTrader is running** makes NinjaTrader recompile and hot-reload the assembly by itself — no F5, nobody at the GUI. Measured on NinjaTrader 8.1.7.2: `NinjaTrader.Custom.dll` was rebuilt ~19 s after the file landed, and the new code was live. `deploy` writes a temp file and renames it over the destination; that rename path was separately verified to trigger the same reload (`Custom.dll` rebuilt within seconds on 8.1.6.x), so `deploy` is not an inert copy either.
+
+That is useful — it is the missing "load" step, and it works headlessly — but it has two teeth worth knowing before you script it:
+
+- **It reloads the assembly underneath whatever is running.** A code sync during a live session restarts strategies and indicators mid-flight. Deploy deliberately, not casually.
+- **The reload does *not* close already-open AddOn windows.** A `NTWindow` you opened survives, still executing the *old* assembly's code, while the new assembly's statics start empty. So an AddOn that opens a window on load can stack a second instance on top of a live one, and neither statics nor `Type` identity can detect it (both reset across the reload). If your AddOn auto-opens anything, interlock it on an artifact that crosses the reload boundary — a file, or a timestamped line in your own log — and test the interlock by deploying while the window is open.
+
+A **bars type** is the exception: its instance is sticky on a chart, so new bars-type code needs an Editor F5 *and* a chart reload.
 
 ### backtest
 
@@ -245,7 +260,7 @@ The AddOn writes a heartbeat from NinjaTrader's main UI thread each second. The 
 
 ```bash
 python -m nt8bridge deploy --strategy MyStrategy.cs
-python -m nt8bridge compile --type MyStrategy              # fix errors until: {"ok": true, "errors": []}
+python -m nt8bridge compile                               # fix errors until: {"ok": true, "errors": []}
 python -m nt8bridge configure --config config/config.json  # set instrument/dates/bar-type on the SA tab
 python -m nt8bridge backtest  --config config/config.json --pdf report.pdf
 python -m nt8bridge peek                                   # re-read the result + confirm params injected

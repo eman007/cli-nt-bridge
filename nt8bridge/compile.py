@@ -37,11 +37,15 @@ def parse_compile_response(payload: dict) -> CompileResult:
     )
 
 
-def run_compile(type_name: str, timeout: float = 30.0) -> CompileResult:
+def run_compile(type_name: str = "", timeout: float = 120.0) -> CompileResult:
     """Drop a compile request for the in-NT8 AddOn and wait for its result.
 
+    `type_name` is accepted for back-compat and ignored: NinjaTrader's compiler
+    always builds the whole tree (exactly as F5 does), so there is nothing to scope.
+
     Raises TimeoutError if the AddOn does not respond within `timeout` (NT8 not
-    running, AddOn not compiled, or NT8 hung).
+    running, AddOn not compiled, NT8 hung -- or simply a tree that compiles slower
+    than the timeout, in which case NT is still working and a retry will succeed).
     """
     trigger, result = ntio.ensure_bridge_dirs()
     request_id = new_request_id()
