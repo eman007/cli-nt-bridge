@@ -47,6 +47,14 @@ def offscreen(win: dict, vs_left=-32768, vs_top=-32768, vs_right=32767, vs_botto
     width = win.get("width", 0)
     if not win.get("visible", False):
         return False
+    # ⚠ A MINIMIZED WINDOW IS NOT AN UNREACHABLE ONE. Windows parks minimized windows at
+    # (-32000, -32000) by convention and they still report visible=true, so the coordinate test below
+    # classifies every minimized window as lost. Measured against a live NinjaTrader: 1 of 67 windows,
+    # a minimized chart — small here, but it scales with however many the user has minimized, and each
+    # one is a false positive in the exact list whose only job is to be short enough to act on.
+    # The taskbar is how you reach a minimized window; it is not unreachable.
+    if win.get("minimized", False):
+        return False
     if left <= -30000 or top <= -30000 or left >= 30000 or top >= 30000:
         return True
     return (left + width) < vs_left + 40 or left > vs_right - 40 or top > vs_bottom - 20
