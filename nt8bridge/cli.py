@@ -17,6 +17,8 @@ from nt8bridge import connections as ntconnections
 from nt8bridge import reconnect as ntreconnect
 from nt8bridge import connwatch as ntconnwatch
 from nt8bridge import compile as ntcompile
+from nt8bridge import reload as ntreload
+from nt8bridge import windows as ntwindows
 from nt8bridge import config as ntconfig
 from nt8bridge import deploy, ntio, precheck
 from nt8bridge import report as ntreport
@@ -161,6 +163,41 @@ def _compile(type_name: str, timeout: float) -> int:
         )
     )
     return 0 if res.ok else 1
+
+
+def _reload(timeout: float) -> int:
+    """Full build + assembly swap — the step that used to require a human pressing F5."""
+    try:
+        res = ntreload.run_reload(timeout=timeout)
+    except TimeoutError as e:
+        print(json.dumps({
+            "command": "reload", "status": "timeout", "ok": False, "message": str(e),
+            "hint": "a reload emits and swaps the assembly, which is real work — slower than "
+                    "`compile`. NT may still be reloading; retry with a longer --timeout.",
+        }, indent=2))
+        return 2
+    print(json.dumps({
+        "command": "reload", "ok": res.ok, "errors": res.errors,
+        "assemblyReloaded": res.assembly_reloaded,
+        "note": None if res.assembly_reloaded else
+                "assembly NOT reloaded — the build failed, so NT kept the previous assembly.",
+    }, indent=2))
+    return 0 if res.ok else 1
+
+
+def _windows(timeout: float, offscreen_only: bool) -> int:
+    try:
+        payload = ntwindows.run_windows(timeout=timeout)
+    except TimeoutError as e:
+        print(json.dumps({"command": "windows", "status": "timeout", "ok": False,
+                          "message": str(e)}, indent=2))
+        return 2
+    wins = payload.get("windows", [])
+    if offscreen_only:
+        wins = [w for w in wins if ntwindows.offscreen(w)]
+    print(json.dumps({"command": "windows", "ok": payload.get("status") == "ok",
+                      "count": len(wins), "windows": wins}, indent=2))
+    return 0
 
 
 def _backtest(config_path: str, timeout: float, pdf=None) -> int:
@@ -535,6 +572,11 @@ def main(argv: list[str]) -> int:
     # A real tree can take well over 30s to compile; the old default turned a healthy
     # compile into a spurious "timeout".
     p_com.add_argument("--timeout", type=float, default=120.0)
+    p_rel = sub.add_parser("reload", help="compile AND load it (what F5 does) — DISRUPTIVE")
+    p_rel.add_argument("--timeout", type=float, default=240.0)
+    p_win = sub.add_parser("windows", help="inventory NT's top-level windows")
+    p_win.add_argument("--timeout", type=float, default=30.0)
+    p_win.add_argument("--offscreen", action="store_true", help="only windows that look unreachable")
     p_bt = sub.add_parser("backtest")
     p_bt.add_argument("--config", required=True)
     p_bt.add_argument("--timeout", type=float, default=120.0)
@@ -654,6 +696,10 @@ def main(argv: list[str]) -> int:
         return _deploy(args.strategy, args.kind)
     if args.command == "compile":
         return _compile(args.type, args.timeout)
+    if args.command == "reload":
+        return _reload(args.timeout)
+    if args.command == "windows":
+        return _windows(args.timeout, args.offscreen)
     if args.command == "backtest":
         return _backtest(args.config, args.timeout, args.pdf)
     if args.command == "account":

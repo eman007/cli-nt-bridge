@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-30
+
+### Added
+
+- **`reload` — compile AND load it.** `compile` invokes NinjaTrader's compiler with
+  `checkCompileOnly=true`: it answers "does this build?" and emits nothing, so a brand-new type never
+  appears in the pickers and edited code is not running. Every headless edit loop still ended with a
+  human alt-tabbing to the NinjaScript Editor to press F5 — the one step the bridge exists to remove.
+  `reload` runs the same compiler with `checkCompileOnly=false`, so NinjaTrader emits and swaps the
+  NinjaScript assembly exactly as F5 does. Measured: **27s on a ~560-file tree, `assemblyReloaded: true`.**
+
+  Deliberately a **separate command, not a flag on `compile`**: a reload restarts indicators, can
+  interrupt a running strategy, and orphans bars-type instances (recreated only by an NT process
+  restart). It must never happen as a side effect of validating code.
+
+- **`windows` — inventory NinjaTrader's top-level windows.** Type/title/HWND, visible, minimized,
+  maximized, and screen geometry. Useful for UI and AddOn work, for asserting platform state before
+  driving automation, and for finding windows dragged or thrown off-screen. `--offscreen` filters to
+  the ones that look unreachable.
+
+### Changed
+
+- **`assemblyReloaded` is now truthful.** It was hardcoded `false` in the AddOn's result builder, so a
+  caller could never tell whether its code was live. It is now true only when a non-check build
+  actually succeeded. This is also why `checkCompileOnly=false` looked like it did nothing when tested
+  directly: the Roslyn diagnostics are genuinely identical either way, and the one field that would
+  have shown the assembly swap was hardcoded.
+
+### Notes for implementers
+
+⚠ **NinjaTrader runs each window on its own dispatcher thread.** Measured via this release's own
+`windows` command: **179 windows across 26 distinct UI threads**, with the visible ones spread over
+six. Any cross-window code must use Win32 on the HWND — `w.Left`, `.IsVisible`, `.WindowState`,
+`Mouse.LeftButton` and `Keyboard.Modifiers` all throw `InvalidOperationException` from a central loop.
+
+**`new WindowInteropHelper(w).Handle` throws too** — it reads the Window's thread-affine `HwndSource`,
+so you cannot even obtain the handle off-thread. The first draft of `windows` did exactly that and
+returned a confident `status:"ok", count:0` that looked like NinjaTrader had no windows. `EnumWindows`
+filtered by process id is the correct approach: thread-agnostic, no dispatcher marshalling (which can
+deadlock against a busy window thread), and it also catches windows absent from `Globals.AllWindows`.
+
 ## [1.2.0] - 2026-07-22
 
 ### Changed

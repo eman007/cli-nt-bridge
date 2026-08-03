@@ -18,10 +18,12 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;   // windows: Win32 window inventory (NT is multi-UI-threaded)
 using System.Text;
 using System.Threading;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Interop;           // windows: WindowInteropHelper -> HWND
 using NinjaTrader.Cbi;
 using NinjaTrader.Core;
 using NinjaTrader.Data;
@@ -137,6 +139,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                 kind = ExtractJsonString(text, "kind");
                 if (kind == "compile")
                     WriteResult("compile_" + id + ".json", RunCompile(id));
+                else if (kind == "reload")
+                    WriteResult("reload_" + id + ".json", RunCompileCore(id, true));
+                else if (kind == "windows")
+                    WriteResult("windows_" + id + ".json", RunWindows(id));
                 else if (kind == "backtest")
                     RunBacktest(id, ParseParams(text));
                 else if (kind == "account")
@@ -197,6 +203,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (kind == "performance") return "perf_";
             if (kind == "perfwindow") return "perfwindow_";
             if (kind == "chartseries") return "chartseries_";
+            if (kind == "reload") return "reload_";
+            if (kind == "windows") return "windows_";
             if (kind == "marketReplayDump") return "marketReplayDump_";
             if (kind == "marketReplayDownload") return "marketReplayDownload_";
             return "compile_";
@@ -204,15 +212,143 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         private string RunCompile(string id)
         {
+            return RunCompileCore(id, false);
+        }
+
+        // ── compile vs reload ────────────────────────────────────────────────────────────────────
+        //  `checkCompileOnly` is the ONLY difference, and it is the difference between "does this
+        //  code build" and "is this code now RUNNING".
+        //
+        //    compile  (checkCompileOnly = TRUE)  — validates the tree and emits nothing. Fast, and it
+        //             disturbs nothing: no indicator reloads, no strategy restarts, no chart flicker.
+        //             This is what you want in an edit loop.
+        //    reload   (checkCompileOnly = FALSE) — a real build. NinjaTrader swaps in the new
+        //             NinjaScript assembly exactly as the Editor's F5 does, so new TYPES appear in the
+        //             pickers and existing indicators reload. This is the step that used to require a
+        //             human pressing F5.
+        //
+        //  ⚠ reload is DISRUPTIVE by nature: it restarts indicators and can interrupt a running
+        //  strategy, and on this suite it also orphans bars-type instances (they are NOT recreated by
+        //  a reload or a chart reload — only by an NT restart). Never fire it into a live bake.
+        //  Kept as a SEPARATE command rather than a flag on compile so it can never happen by accident.
+        private string RunCompileCore(string id, bool reload)
+        {
             Type compilerType = Type.GetType("NinjaTrader.Code.Compiler, NinjaTrader.Core");
             if (compilerType == null) throw new Exception("NinjaTrader.Code.Compiler not found");
             MethodInfo compile = compilerType.GetMethod("Compile", BindingFlags.Public | BindingFlags.Static);
             if (compile == null) throw new Exception("Compiler.Compile(...) not found");
 
             var empty = new List<string>();
-            // checkCompileOnly=true, debugBuild=false, filesToIgnore=[], filesInTmp=[]
-            object emit = compile.Invoke(null, new object[] { true, false, empty, empty });
-            return BuildResultJson(id, emit);
+            // checkCompileOnly, debugBuild=false, filesToIgnore=[], filesInTmp=[]
+            object emit = compile.Invoke(null, new object[] { !reload, false, empty, empty });
+
+            // Report the reload HONESTLY: only a non-check build that actually succeeded swapped the
+            // assembly. Previously this field was hardcoded false, which made a real reload
+            // indistinguishable from a check — the caller could never tell whether its code was live.
+            bool ok = EmitSucceeded(emit);
+            return BuildResultJson(id, emit, reload && ok);
+        }
+
+        // ═════════════════════════════════════════════════════════════════════════════════════════
+        //  windows — an inventory of NinjaTrader's top-level windows.
+        //
+        //  ⚠ WIN32 ONLY, AND THIS IS NOT A STYLE CHOICE. NinjaTrader runs EACH WINDOW ON ITS OWN
+        //  DISPATCHER THREAD, so reading `w.Left` / `.ActualWidth` / `.IsVisible` / `.WindowState`
+        //  from this poller thread throws `InvalidOperationException: The calling thread cannot access
+        //  this object because a different thread owns it` — on every window, every time. A handler
+        //  written against WPF properties returns an empty list and looks like "NT has no windows".
+        //  GetWindowRect / IsWindowVisible / IsIconic / IsZoomed are thread-agnostic; use those.
+        //
+        //  `Globals.AllWindows` is only touched to collect HWNDs (cheap, no geometry), and even that
+        //  is snapshotted first because the collection mutates as windows open and close.
+        // ═════════════════════════════════════════════════════════════════════════════════════════
+        [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out BridgeRect r);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+        [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr h);
+        [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr h);
+        [DllImport("user32.dll")] private static extern bool IsZoomed(IntPtr h);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BridgeRect { public int Left, Top, Right, Bottom; }
+
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr p);
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+
+        private string RunWindows(string id)
+        {
+            //  ⚠ ENUMERATED VIA WIN32, NOT VIA Globals.AllWindows.
+            //
+            //  The first version of this walked `Globals.AllWindows` and called
+            //  `new WindowInteropHelper(w).Handle` to get each HWND. That THROWS: WindowInteropHelper
+            //  reads the Window's HwndSource, which is thread-affine like every other WPF member, so
+            //  from the poller thread it raises "The calling thread cannot access this object because
+            //  a different thread owns it" for EVERY window and the handler returns an empty list —
+            //  a confident `status:"ok", count:0` that looks like NinjaTrader has no windows.
+            //
+            //  You cannot even obtain the HANDLE off-thread. So do not start from WPF objects at all:
+            //  EnumWindows filtered by our own process id is completely thread-agnostic, needs no
+            //  dispatcher marshalling (which could deadlock against a busy window thread), and also
+            //  catches top-level windows that never appear in Globals.AllWindows.
+            var rows = new List<string>();
+            try
+            {
+                uint self = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+                // Held in a local so the GC cannot collect the delegate while EnumWindows runs.
+                EnumWindowsProc cb = delegate(IntPtr h, IntPtr lp)
+                {
+                    try
+                    {
+                        uint pid;
+                        GetWindowThreadProcessId(h, out pid);
+                        if (pid != self || !IsWindow(h)) return true;
+
+                        var title = new StringBuilder(400);
+                        GetWindowText(h, title, title.Capacity);
+                        var cls = new StringBuilder(200);
+                        GetClassName(h, cls, cls.Capacity);
+
+                        // Untitled HWNDs are message-only//tooltip/layered helpers, not real windows.
+                        if (title.Length == 0) return true;
+
+                        BridgeRect r;
+                        bool got = GetWindowRect(h, out r);
+                        rows.Add("{\"hwnd\":" + h.ToInt64().ToString(InvCi) +
+                                 ",\"title\":" + JsonStr(title.ToString()) +
+                                 ",\"class\":" + JsonStr(cls.ToString()) +
+                                 ",\"visible\":" + (IsWindowVisible(h) ? "true" : "false") +
+                                 ",\"minimized\":" + (IsIconic(h) ? "true" : "false") +
+                                 ",\"maximized\":" + (IsZoomed(h) ? "true" : "false") +
+                                 ",\"left\":" + (got ? r.Left : 0).ToString(InvCi) +
+                                 ",\"top\":" + (got ? r.Top : 0).ToString(InvCi) +
+                                 ",\"width\":" + (got ? r.Right - r.Left : 0).ToString(InvCi) +
+                                 ",\"height\":" + (got ? r.Bottom - r.Top : 0).ToString(InvCi) + "}");
+                    }
+                    catch (Exception ex) { LogSafe("RunWindows row: " + ex.Message); }
+                    return true;
+                };
+                EnumWindows(cb, IntPtr.Zero);
+                GC.KeepAlive(cb);
+            }
+            catch (Exception ex)
+            {
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"message\":" + JsonStr(ex.Message) + "}";
+            }
+            return "{\"id\":" + JsonStr(id) + ",\"status\":\"ok\",\"count\":" + rows.Count.ToString(InvCi) +
+                   ",\"windows\":[" + string.Join(",", rows.ToArray()) + "]}";
+        }
+
+        private static bool EmitSucceeded(object emit)
+        {
+            try
+            {
+                if (emit == null) return true;               // no result object == nothing to complain about
+                PropertyInfo succ = emit.GetType().GetProperty("Success");
+                return succ == null || (bool)succ.GetValue(emit, null);
+            }
+            catch { return false; }
         }
 
         // --- Part 3: run a backtest by firing the SA's RunCommand (the exact
@@ -1074,7 +1210,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"errors\":[{\"message\":" + JsonStr(msg) + "}]}";
         }
 
-        private string BuildResultJson(string id, object emit)
+        private string BuildResultJson(string id, object emit) { return BuildResultJson(id, emit, false); }
+
+        private string BuildResultJson(string id, object emit, bool assemblyReloaded)
         {
             bool success = true;
             var errors = new List<string>();
@@ -1130,7 +1268,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
             string status = (success && errors.Count == 0) ? "ok" : "error";
             return "{\"id\":" + JsonStr(id) + ",\"status\":\"" + status + "\",\"errors\":[" +
-                   string.Join(",", errors.ToArray()) + "],\"assemblyReloaded\":false}";
+                   string.Join(",", errors.ToArray()) + "],\"assemblyReloaded\":" +
+                   ((assemblyReloaded && status == "ok") ? "true" : "false") + "}";
         }
 
         // --- Account state: independent, out-of-band read of NT8's own Account
