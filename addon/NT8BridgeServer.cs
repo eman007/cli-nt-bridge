@@ -161,6 +161,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     WriteResult("workspace_" + id + ".json", RunWorkspace(id));
                 else if (kind == "screenshot")
                     WriteResult("screenshot_" + id + ".json", RunScreenshot(id, text));
+                else if (kind == "layout")
+                    WriteResult("layout_" + id + ".json", RunLayout(id, text));
                 else if (kind == "peek")
                     WriteResult("peek_" + id + ".json", RunPeek(id));
                 else if (kind == "probe")
@@ -208,6 +210,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (kind == "ntstatus") return "ntstatus_";
             if (kind == "workspace") return "workspace_";
             if (kind == "screenshot") return "screenshot_";
+            if (kind == "layout") return "layout_";
             if (kind == "peek") return "peek_";
             if (kind == "probe") return "probe_";
             if (kind == "configure") return "configure_";
@@ -890,6 +893,227 @@ namespace NinjaTrader.NinjaScript.AddOns
         [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr dc);
         [DllImport("gdi32.dll")] private static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h,
                                                                    IntPtr src, int sx, int sy, int rop);
+
+        // ── layout P/Invoke ─────────────────────────────────────────────────────────────────────────────
+        //  DWM frame bounds, restored placement, monitor work areas, and the one mutating call in the
+        //  whole file. See RunLayout for why each is needed.
+        [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+        [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr h, int cmd);
+        [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr h, uint cmd);
+        [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr h, int idx);
+        [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr h, int attr, out BridgeRect r, int size);
+        [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
+        private static extern int DwmGetWindowAttributeInt(IntPtr h, int attr, out int v, int size);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BridgePlacement
+        {
+            public int length, flags, showCmd;
+            public int minX, minY, maxX, maxY;
+            public int normLeft, normTop, normRight, normBottom;
+        }
+        [DllImport("user32.dll")] private static extern bool GetWindowPlacement(IntPtr h, ref BridgePlacement p);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BridgeMonitorInfo
+        {
+            public int cbSize;
+            public BridgeRect monitor;
+            public BridgeRect work;
+            public uint flags;
+        }
+        private delegate bool MonitorEnumProc(IntPtr mon, IntPtr dc, ref BridgeRect r, IntPtr data);
+        [DllImport("user32.dll")] private static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, MonitorEnumProc cb, IntPtr data);
+        [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr mon, ref BridgeMonitorInfo info);
+
+        private const int  DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+        private const int  DWMWA_CLOAKED = 14;
+        private const int  SW_RESTORE_L = 9, SW_MINIMIZE_L = 6, SW_MAXIMIZE_L = 3;
+        private const uint SWP_NOZORDER_L = 0x0004, SWP_NOACTIVATE_L = 0x0010;
+        private const int  GWL_EXSTYLE_L = -20;
+        private const int  WS_EX_TOOLWINDOW_L = 0x00000080;
+        private const uint GW_OWNER_L = 4;
+        private const uint MONITORINFOF_PRIMARY = 1;
+
+        // ── layout ──────────────────────────────────────────────────────────────────────────────────────
+        //  READ AND WRITE WHERE NINJATRADER'S WINDOWS SIT.
+        //
+        //  ⭐ WHY: every input to a replay-equivalence run that we made verifiable is a FILE we can hash
+        //  — the code, the .nrd, the historical bars, the chart+strategy blob. Window layout was not one
+        //  of them: it lived only inside a running NinjaTrader, set by hand, per box, at different
+        //  moments. That is the same shape as the transport state that cost a day, and the Playback range
+        //  that "does not travel". A fleet of six workers cannot have an input that needs a GUI click per
+        //  box — it is guaranteed to diverge across a matrix.
+        //
+        //  ⚠ THIS HANDLER IS DELIBERATELY DUMB. It enumerates, and it moves an HWND it is told to move.
+        //  It does NOT match windows, compute fractions, or decide anything. All of that lives in the
+        //  Python half, where it is unit-testable without a running NinjaTrader — the AddOn is the one
+        //  place in this system that cannot be tested offline, so the less judgement it holds the better.
+        //
+        //  ⚠ ORDER: place FIRST, then enumerate. The response therefore describes the state the apply
+        //  actually produced rather than the one it intended, so a caller can verify instead of trusting.
+        private string RunLayout(string id, string triggerJson)
+        {
+            string place = ExtractJsonString(triggerJson, "place");
+            int placed = 0;
+            var failed = new List<string>();
+
+            try { SetProcessDPIAware(); } catch { }
+
+            if (!string.IsNullOrEmpty(place))
+            {
+                foreach (string rec in place.Split(';'))
+                {
+                    if (rec.Trim().Length == 0) continue;
+                    try
+                    {
+                        // hwnd,x,y,w,h,state
+                        string[] f = rec.Split(',');
+                        if (f.Length < 5) { failed.Add(rec + " (malformed)"); continue; }
+                        IntPtr h = new IntPtr(long.Parse(f[0], InvCi));
+                        int x = int.Parse(f[1], InvCi), y = int.Parse(f[2], InvCi);
+                        int w = int.Parse(f[3], InvCi), ht = int.Parse(f[4], InvCi);
+                        string state = f.Length > 5 ? f[5] : "normal";
+
+                        if (!IsWindow(h)) { failed.Add(f[0] + " (dead hwnd)"); continue; }
+
+                        // Windows refuses to move a maximized or minimized window; restore it first or
+                        // SetWindowPos silently succeeds and does nothing.
+                        if (IsZoomed(h) || IsIconic(h)) { ShowWindow(h, SW_RESTORE_L); System.Threading.Thread.Sleep(40); }
+
+                        // Aim the VISIBLE edge, not the window rect. Since Windows 10 the window rect
+                        // includes an invisible resize border (~7px/side, measured), so snapping to it
+                        // leaves every window visibly misaligned against its neighbour.
+                        BridgeRect wr, vr;
+                        bool gotW = GetWindowRect(h, out wr);
+                        bool gotV = DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, out vr, Marshal.SizeOf(typeof(BridgeRect))) == 0;
+                        int dl = 0, dt = 0, dr = 0, db = 0;
+                        if (gotW && gotV)
+                        {
+                            dl = vr.Left - wr.Left; dt = vr.Top - wr.Top;
+                            dr = wr.Right - vr.Right; db = wr.Bottom - vr.Bottom;
+                        }
+                        bool ok = SetWindowPos(h, IntPtr.Zero, x - dl, y - dt, w + dl + dr, ht + dt + db,
+                                               SWP_NOZORDER_L | SWP_NOACTIVATE_L);
+                        if (!ok) { failed.Add(f[0] + " (SetWindowPos failed)"); continue; }
+
+                        // Restore the STATE too. Placing requires un-minimizing, so without this an
+                        // apply pops open every minimized window it touches.
+                        if (state == "minimized") ShowWindow(h, SW_MINIMIZE_L);
+                        else if (state == "maximized") ShowWindow(h, SW_MAXIMIZE_L);
+                        placed++;
+                    }
+                    catch (Exception ex) { failed.Add(rec + " (" + ex.GetType().Name + ")"); }
+                }
+            }
+
+            var mons = new List<string>();
+            var monWork = new List<BridgeRect>();
+            try
+            {
+                MonitorEnumProc mcb = delegate(IntPtr mon, IntPtr dc, ref BridgeRect r, IntPtr data)
+                {
+                    try
+                    {
+                        var mi = new BridgeMonitorInfo();
+                        mi.cbSize = Marshal.SizeOf(typeof(BridgeMonitorInfo));
+                        if (!GetMonitorInfo(mon, ref mi)) return true;
+                        monWork.Add(mi.work);
+                        mons.Add("{\"id\":" + (mons.Count).ToString(InvCi) +
+                                 ",\"primary\":" + (((mi.flags & MONITORINFOF_PRIMARY) != 0) ? "true" : "false") +
+                                 ",\"work\":{\"x\":" + mi.work.Left.ToString(InvCi) +
+                                 ",\"y\":" + mi.work.Top.ToString(InvCi) +
+                                 ",\"w\":" + (mi.work.Right - mi.work.Left).ToString(InvCi) +
+                                 ",\"h\":" + (mi.work.Bottom - mi.work.Top).ToString(InvCi) + "}}");
+                    }
+                    catch (Exception ex) { LogSafe("RunLayout monitor: " + ex.Message); }
+                    return true;
+                };
+                EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, mcb, IntPtr.Zero);
+                GC.KeepAlive(mcb);
+            }
+            catch (Exception ex) { LogSafe("RunLayout monitors: " + ex.Message); }
+
+            var rows = new List<string>();
+            try
+            {
+                uint self = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+                EnumWindowsProc cb = delegate(IntPtr h, IntPtr lp)
+                {
+                    try
+                    {
+                        uint pid; GetWindowThreadProcessId(h, out pid);
+                        if (pid != self || !IsWindow(h)) return true;
+                        var title = new StringBuilder(400);
+                        GetWindowText(h, title, title.Capacity);
+                        if (title.Length == 0) return true;
+                        var cls = new StringBuilder(200);
+                        GetClassName(h, cls, cls.Capacity);
+
+                        BridgeRect wr; bool gotW = GetWindowRect(h, out wr);
+                        BridgeRect vr;
+                        bool gotV = DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, out vr, Marshal.SizeOf(typeof(BridgeRect))) == 0;
+                        if (!gotV) vr = wr;
+
+                        var wp = new BridgePlacement();
+                        wp.length = Marshal.SizeOf(typeof(BridgePlacement));
+                        bool gotP = GetWindowPlacement(h, ref wp);
+
+                        int cloaked = 0;
+                        try { DwmGetWindowAttributeInt(h, DWMWA_CLOAKED, out cloaked, sizeof(int)); } catch { }
+
+                        // Which monitor: by the window's CENTRE, and never fail to answer — a window
+                        // straddling two screens still has to be attributed to one of them.
+                        int cx = (vr.Left + vr.Right) / 2, cy = (vr.Top + vr.Bottom) / 2;
+                        int mi2 = -1; long bestD = long.MaxValue;
+                        for (int i = 0; i < monWork.Count; i++)
+                        {
+                            BridgeRect m = monWork[i];
+                            if (cx >= m.Left && cx < m.Right && cy >= m.Top && cy < m.Bottom) { mi2 = i; break; }
+                            long mx = (m.Left + m.Right) / 2, my = (m.Top + m.Bottom) / 2;
+                            long d = (cx - mx) * (cx - mx) + (cy - my) * (cy - my);
+                            if (d < bestD) { bestD = d; mi2 = i; }
+                        }
+
+                        int ex = GetWindowLong(h, GWL_EXSTYLE_L);
+                        rows.Add("{\"hwnd\":" + h.ToInt64().ToString(InvCi) +
+                                 ",\"title\":" + JsonStr(title.ToString()) +
+                                 ",\"class\":" + JsonStr(cls.ToString()) +
+                                 ",\"visible\":" + (IsWindowVisible(h) ? "true" : "false") +
+                                 ",\"minimized\":" + (IsIconic(h) ? "true" : "false") +
+                                 ",\"maximized\":" + (IsZoomed(h) ? "true" : "false") +
+                                 ",\"cloaked\":" + (cloaked != 0 ? "true" : "false") +
+                                 ",\"owned\":" + (GetWindow(h, GW_OWNER_L) != IntPtr.Zero ? "true" : "false") +
+                                 ",\"toolWindow\":" + (((ex & WS_EX_TOOLWINDOW_L) != 0) ? "true" : "false") +
+                                 ",\"monitor\":" + mi2.ToString(InvCi) +
+                                 ",\"visual\":{\"x\":" + vr.Left.ToString(InvCi) + ",\"y\":" + vr.Top.ToString(InvCi) +
+                                 ",\"w\":" + (vr.Right - vr.Left).ToString(InvCi) + ",\"h\":" + (vr.Bottom - vr.Top).ToString(InvCi) + "}" +
+                                 ",\"restored\":{\"x\":" + (gotP ? wp.normLeft : 0).ToString(InvCi) +
+                                 ",\"y\":" + (gotP ? wp.normTop : 0).ToString(InvCi) +
+                                 ",\"w\":" + (gotP ? wp.normRight - wp.normLeft : 0).ToString(InvCi) +
+                                 ",\"h\":" + (gotP ? wp.normBottom - wp.normTop : 0).ToString(InvCi) + "}}");
+                    }
+                    catch (Exception ex2) { LogSafe("RunLayout row: " + ex2.Message); }
+                    return true;
+                };
+                EnumWindows(cb, IntPtr.Zero);
+                GC.KeepAlive(cb);
+            }
+            catch (Exception ex)
+            {
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"message\":" + JsonStr(ex.Message) + "}";
+            }
+
+            var fj = new List<string>();
+            foreach (string s in failed) fj.Add(JsonStr(s));
+            return "{\"id\":" + JsonStr(id) + ",\"status\":\"ok\"" +
+                   ",\"ts\":" + JsonStr(DateTime.UtcNow.ToString("o")) +
+                   ",\"placed\":" + placed.ToString(InvCi) +
+                   ",\"failed\":[" + string.Join(",", fj.ToArray()) + "]" +
+                   ",\"monitors\":[" + string.Join(",", mons.ToArray()) + "]" +
+                   ",\"count\":" + rows.Count.ToString(InvCi) +
+                   ",\"windows\":[" + string.Join(",", rows.ToArray()) + "]}";
+        }
 
         private string RunWindows(string id)
         {

@@ -18,6 +18,7 @@ from nt8bridge import playback as ntplayback
 from nt8bridge import screenshot as ntscreenshot
 from nt8bridge import ntstatus as ntntstatus
 from nt8bridge import workspace as ntworkspace
+from nt8bridge import layout as ntlayout
 from nt8bridge import reconnect as ntreconnect
 from nt8bridge import connwatch as ntconnwatch
 from nt8bridge import compile as ntcompile
@@ -69,6 +70,8 @@ Commands:
   python -m nt8bridge ntstatus                   is NT running the code on disk? (catches a stale DLL)
   python -m nt8bridge workspace                  charts + indicators + strategies AND their enabled state
   python -m nt8bridge screenshot --title Conductor   capture a window as PNG (see the screen, don't relay it)
+  python -m nt8bridge layout --out fleet.json      capture where NT's windows sit (a hashable file)
+  python -m nt8bridge layout --apply fleet.json    put them back, headlessly, on any box
   python -m nt8bridge reconnect --name X         reconnect a dropped connection
   python -m nt8bridge connwatch --name X         auto-reconnect inadvertent drops (loop)
   python -m nt8bridge watchdog                   restart NT8 if it hangs/crashes
@@ -519,6 +522,58 @@ def _workspace(strategy: str | None, timeout: float) -> int:
     return rc
 
 
+def _layout(out_path, apply_path, name, dry_run, timeout) -> int:
+    """Capture where NT's windows sit, or put them back.
+
+    Exit codes carry the verdict so a bake script can gate on it: 0 clean, 1 the AddOn did not
+    answer, 3 applied but something did not land. A partial apply must never read as success.
+    """
+    try:
+        payload = ntlayout.run_layout(timeout=timeout)
+    except TimeoutError as e:
+        print(json.dumps({"command": "layout", "status": "timeout", "ok": False, "message": str(e)}, indent=2))
+        return 1
+    state = ntlayout.parse_layout_response(payload)
+    if not state.ok:
+        print(json.dumps({"command": "layout", **payload}, indent=2))
+        return 1
+
+    if not apply_path:
+        doc = ntlayout.capture(state, name or "layout")
+        if out_path:
+            ntlayout.write_layout_file(out_path, doc)
+        print(json.dumps({"command": "layout", "action": "capture",
+                          "written": str(out_path) if out_path else None,
+                          "monitors": len(doc["monitors"]), "windows": len(doc["windows"]),
+                          "layout": None if out_path else doc}, indent=2))
+        return 0
+
+    doc = ntlayout.read_layout_file(apply_path)
+    plan, problems = ntlayout.plan_apply(doc, state)
+    blocking = [p for p in problems if p.get("severity") != "note"]
+    if dry_run:
+        print(json.dumps({"command": "layout", "action": "plan", "dryRun": True,
+                          "plan": plan, "problems": problems}, indent=2))
+        return 0 if not blocking else 3
+    if not plan:
+        print(json.dumps({"command": "layout", "action": "apply", "placed": 0,
+                          "problems": problems,
+                          "hint": "nothing matched — run `layout --out cur.json` on this box and "
+                                  "diff titleKey/classKey against the layout you are applying"}, indent=2))
+        return 3
+
+    try:
+        after = ntlayout.run_layout(place=ntlayout.format_place(plan), timeout=timeout)
+    except TimeoutError as e:
+        print(json.dumps({"command": "layout", "status": "timeout", "ok": False, "message": str(e)}, indent=2))
+        return 1
+    st2 = ntlayout.parse_layout_response(after)
+    print(json.dumps({"command": "layout", "action": "apply",
+                      "requested": len(plan), "placed": st2.placed,
+                      "failed": st2.failed, "problems": problems}, indent=2))
+    return 0 if (st2.placed == len(plan) and not blocking and not st2.failed) else 3
+
+
 def _screenshot(title: str | None, hwnd: int | None, out: str | None, timeout: float) -> int:
     try:
         payload = ntscreenshot.run_screenshot(title, hwnd, out, timeout=timeout)
@@ -724,6 +779,13 @@ def main(argv: list[str]) -> int:
     p_ws = sub.add_parser("workspace", help="charts, indicators, strategies + enabled state")
     p_ws.add_argument("--strategy", help="assert a strategy matching this fragment is enabled (exit 2 if not)")
     p_ws.add_argument("--timeout", type=float, default=30.0)
+    p_lay = sub.add_parser("layout", help="capture/apply where NT's windows sit (fractions, not pixels)")
+    p_lay.add_argument("--out", help="write the captured layout here (default: print it)")
+    p_lay.add_argument("--apply", dest="apply_path", help="layout file to apply")
+    p_lay.add_argument("--name", help="name recorded inside a captured layout")
+    # A layout moves real windows and there is no undo, so the plan is inspectable before it runs.
+    p_lay.add_argument("--dry-run", action="store_true", help="resolve the plan and print it, move nothing")
+    p_lay.add_argument("--timeout", type=float, default=30.0)
     p_recon = sub.add_parser("reconnect")
     p_recon.add_argument("--name", required=True, help="connection name to reconnect (REQUIRED)")
     p_recon.add_argument("--timeout", type=float, default=30.0)
@@ -839,6 +901,8 @@ def main(argv: list[str]) -> int:
         return _screenshot(args.title, args.hwnd, args.out, args.timeout)
     if args.command == "workspace":
         return _workspace(args.strategy, args.timeout)
+    if args.command == "layout":
+        return _layout(args.out, args.apply_path, args.name, args.dry_run, args.timeout)
     if args.command == "reconnect":
         return _reconnect(args.name, args.timeout)
     if args.command == "connwatch":
