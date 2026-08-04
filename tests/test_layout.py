@@ -80,9 +80,21 @@ def test_cloaked_window_is_not_placeable():
     assert [w["hwnd"] for w in st.placeable()] == [2]
 
 
-def test_tool_and_owned_windows_are_not_placeable():
-    st = _state([_win(hwnd=1, toolWindow=True), _win(hwnd=2, owned=True), _win(hwnd=3)])
+def test_tool_windows_are_not_placeable():
+    st = _state([_win(hwnd=1, toolWindow=True), _win(hwnd=3)])
     assert [w["hwnd"] for w in st.placeable()] == [3]
+
+
+def test_an_OWNED_window_is_still_placeable():
+    """NinjaTrader parents its windows to a hidden owner.
+
+    Measured on a sentry: the Playback window AND every chart report owned=True. An earlier version
+    of `placeable` skipped owned windows as "dialogs" and turned 27 live windows into 1 — the entire
+    application — while reporting success. Ownership says nothing about whether a human arranged it.
+    """
+    st = _state([_win(hwnd=1, title="Playback", owned=True),
+                 _win(hwnd=2, title="Chart - NQ 06-26", owned=True)])
+    assert [w["hwnd"] for w in st.placeable()] == [1, 2]
 
 
 def test_stub_sized_window_is_not_placeable():

@@ -80,10 +80,17 @@ class LayoutState:
         window reports visible=True and minimized=False while parked at ~(-32000, -32000) at about
         76x28. Measured on a normal desktop, 28 of 37 "windows" were these. Capture them and the
         file is mostly junk; apply them and you compute real coordinates from garbage.
+
+        ⚠ `owned` is NOT a disqualifier, however tempting. Measured on a sentry: NinjaTrader's
+        Playback window and its charts BOTH report owned=True, because NT parents its windows to a
+        hidden owner. Excluding owned windows dropped 27 windows to 1 — the whole application —
+        and, like every filter mistake in this family, it failed silently: "1 window" and "NT has
+        one window open" are the same output. Tool windows and cloaked windows are the real
+        exclusions; ownership says nothing about whether a human arranged it.
         """
         out = []
         for w in self.windows:
-            if w.get("cloaked") or w.get("toolWindow") or w.get("owned"):
+            if w.get("cloaked") or w.get("toolWindow"):
                 continue
             if not w.get("visible"):
                 continue
