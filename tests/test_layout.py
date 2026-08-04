@@ -252,3 +252,20 @@ def test_parse_response_carries_the_failures():
     st = layout.parse_layout_response({"status": "ok", "placed": 2, "failed": ["9 (dead hwnd)"],
                                        "monitors": [_mon()], "windows": []})
     assert st.ok and st.placed == 2 and st.failed == ["9 (dead hwnd)"]
+
+
+def test_a_minimized_window_is_attributed_by_its_RESTORED_position():
+    """The AddOn's own `monitor` field is computed from the park coordinate and must not be trusted.
+
+    Two monitors; the window lives on monitor 1 but is minimized, so its on-screen rect is the park
+    coordinate and the AddOn attributed it to monitor 0. Dividing the restored geometry by monitor
+    0's work area produced a fraction of x = -3.1 on a real desktop.
+    """
+    w = _win(hwnd=1, minimized=True, monitor=0)          # <- the AddOn's (wrong) answer
+    w["visual"] = {"x": -31990, "y": -32000, "w": 76, "h": 28}
+    w["restored"] = {"x": -4096, "y": 0, "w": 2048, "h": 520}
+    st = _state([w], [_mon(0, x=0, y=0, w=1920, h=1040),
+                      _mon(1, x=-4096, y=0, w=4096, h=1040, primary=False)])
+    doc = layout.capture(st, "cell")
+    assert doc["windows"][0]["monitor"] == 1
+    assert doc["windows"][0]["frac"] == {"x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5}

@@ -164,11 +164,32 @@ def state_of(w: dict) -> str:
 
 
 def _monitor_for(state: LayoutState, w: dict) -> dict | None:
-    mid = w.get("monitor", -1)
+    """Which monitor a window BELONGS to — decided from the geometry we are about to record.
+
+    ⚠ The AddOn's own `monitor` field is deliberately NOT trusted here. It is computed from the
+    window's on-screen rect, which for a minimized window is the park coordinate (~-32000) and
+    therefore attributes it to whichever monitor happens to be nearest that point. Dividing the
+    RESTORED geometry by THAT monitor's work area produced fractions like x = -3.1.
+
+    Found by cross-checking this module's capture against SentinelBerth's on the same desktop: two
+    independent producers of one schema agreed on three windows and disagreed on the two minimized
+    ones. Neither tool alone would have shown it — the numbers are wrong, not absent.
+    """
+    if not state.monitors:
+        return None
+    g = geometry_of(w)
+    cx, cy = g["x"] + g["w"] // 2, g["y"] + g["h"] // 2
+    best, best_d = None, None
     for m in state.monitors:
-        if m.get("id") == mid:
+        k = m["work"]
+        if k["x"] <= cx < k["x"] + k["w"] and k["y"] <= cy < k["y"] + k["h"]:
             return m
-    return state.monitors[0] if state.monitors else None
+        mx, my = k["x"] + k["w"] // 2, k["y"] + k["h"] // 2
+        d = (cx - mx) ** 2 + (cy - my) ** 2
+        if best_d is None or d < best_d:
+            best, best_d = m, d
+    # A window straddling two screens, or parked off every one, still has to be attributed to one.
+    return best
 
 
 def capture(state: LayoutState, name: str, now: str | None = None) -> dict:
