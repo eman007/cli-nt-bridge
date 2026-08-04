@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from nt8bridge import account as ntaccount
@@ -24,6 +25,8 @@ from nt8bridge import connwatch as ntconnwatch
 from nt8bridge import compile as ntcompile
 from nt8bridge import reload as ntreload
 from nt8bridge import windows as ntwindows
+from nt8bridge import regions as ntregions
+from nt8bridge import restart as ntrestart
 from nt8bridge import config as ntconfig
 from nt8bridge import deploy, ntio, precheck
 from nt8bridge import report as ntreport
@@ -130,6 +133,18 @@ def _precheck(strategy: str) -> int:
 
 
 def _deploy(strategy: str, kind: str) -> int:
+    # `strategy` is a SOURCE PATH to stage into bin\Custom, not a class name. The old flag name
+    # implied otherwise and cost a caller a wasted round trip ("deploy --strategy MyThing" fails with
+    # FileNotFoundError: 'MyThing'). --from is the accurate name; --strategy still works.
+    if not os.path.exists(strategy):
+        print(json.dumps({
+            "command": "deploy", "ok": False, "status": "error",
+            "message": f"not a file: {strategy}",
+            "hint": "deploy stages a SOURCE FILE into bin\\Custom. Pass a path "
+                    "(--from C:\\src\\MyThing.cs), not a class name. To make already-in-tree code "
+                    "live, use `reload`.",
+        }, indent=2))
+        return 2
     dest = deploy.deploy(strategy, kind)
     print(
         json.dumps(
@@ -162,6 +177,14 @@ def _compile(type_name: str, timeout: float) -> int:
             )
         )
         return 1
+    # Duplicated generated regions break the WHOLE-TREE compile with CS0111/CS0102 that never name
+    # the cause. Cheap to detect, so detect it here rather than leave it to a human's memory.
+    dupes = []
+    try:
+        dupes = [f["path"] for f in ntregions.scan(ntregions.custom_root(ntio.nt8_root()))
+                 if f["duplicated"]]
+    except Exception:  # noqa: BLE001 - a scan failure must never mask the compile result
+        pass
     print(
         json.dumps(
             {
@@ -169,6 +192,11 @@ def _compile(type_name: str, timeout: float) -> int:
                 "ok": res.ok,
                 "errors": res.errors,
                 "assemblyReloaded": res.assembly_reloaded,
+                "duplicatedRegions": dupes or None,
+                "regionsHint": (
+                    "DUPLICATED NinjaScript generated regions found — these break the whole-tree "
+                    "compile with CS0111/CS0102 that do not name the cause. Run `regions --strip`."
+                ) if dupes else None,
             },
             indent=2,
         )
@@ -209,6 +237,76 @@ def _windows(timeout: float, offscreen_only: bool) -> int:
     print(json.dumps({"command": "windows", "ok": payload.get("status") == "ok",
                       "count": len(wins), "windows": wins}, indent=2))
     return 0
+
+
+def _regions(root: str, strip: bool, all_files: bool) -> int:
+    base = ntregions.custom_root(root or ntio.nt8_root())
+    found = ntregions.scan(base)
+    dupes = [f for f in found if f["duplicated"]]
+    stripped = []
+    if strip:
+        for f in (found if all_files else dupes):
+            n = ntregions.strip_file(f["path"])
+            if n:
+                stripped.append({"path": f["path"], "removed": n})
+    print(json.dumps({
+        "command": "regions", "ok": True, "root": str(base),
+        "filesWithRegions": len(found), "filesDuplicated": len(dupes),
+        "duplicated": dupes,
+        "stripped": stripped,
+        "hint": None if not dupes or strip else
+                "DUPLICATED generated regions WILL break the whole-tree compile (CS0111/CS0102) and "
+                "the errors will not name the cause. Run `regions --strip` before compiling; NT "
+                "regenerates exactly one on its next real build.",
+    }, indent=2))
+    return 0
+
+
+def _restart(task: str, exe: str, wait: float, stop_timeout: float) -> int:
+    """STOP, confirm it stopped, then START. In that order, and the stop may not be skipped.
+
+    The first version never stopped anything: it launched, then called wait_for(True), which returned
+    immediately because the ORIGINAL process was up. It reported ok:true having restarted nothing and
+    left two NinjaTraders against one user directory — a check that could not fail.
+    """
+    was = ntrestart.is_running()
+    kind, selected = ntrestart.choose_start(task, exe)
+    method = "none" if kind == "none" else selected
+
+    def emit(ok: bool, stage: str, detail: str, **extra) -> int:
+        print(json.dumps({
+            "command": "restart", "ok": ok, "stage": stage, "wasRunning": was,
+            "method": method, "detail": detail, "runningNow": ntrestart.is_running(),
+            "note": "a scheduled task created with /IT reaches the interactive session — required "
+                    "for UI automation from an SSH/session-0 shell.",
+            **extra,
+        }, indent=2))
+        return 0 if ok else 1
+
+    # Refuse before doing anything if there is no way to start it again. Stopping NinjaTrader and then
+    # discovering we cannot restart it is the worst outcome available here.
+    if kind == "none":
+        return emit(False, "select", selected)
+
+    stopped, stop_detail = ntrestart.stop(timeout=stop_timeout)
+    if not stopped:
+        return emit(False, "stop", stop_detail,
+                    hint="refusing to launch while NinjaTrader is still running — a second instance "
+                         "against one user directory is a worse state than a failed restart.")
+    if ntrestart.is_running():   # re-check: the stop and the launch are not atomic
+        return emit(False, "stop", "still running after a stop that reported success",
+                    hint="something restarted it between the stop and the launch — a relaunch "
+                         "watchdog, most likely. Disable it for the duration, or restart via its task.")
+
+    started, detail = (ntrestart.run_task(task) if kind == "task"
+                       else ntrestart.launch_exe(exe))
+    if not started:
+        return emit(False, "start", detail,
+                    hint="NinjaTrader is now STOPPED and the start failed — start it by hand.")
+    up = ntrestart.wait_for(True, wait)
+    return emit(up, "start" if up else "wait",
+                detail if up else f"{detail}; not running again within {wait}s",
+                stopDetail=stop_detail)
 
 
 def _backtest(config_path: str, timeout: float, pdf=None) -> int:
@@ -708,7 +806,14 @@ def main(argv: list[str]) -> int:
     p_pre = sub.add_parser("precheck")
     p_pre.add_argument("--strategy", required=True)
     p_dep = sub.add_parser("deploy")
-    p_dep.add_argument("--strategy", required=True)
+    # It takes a PATH. --strategy was a misleading name (it reads as a class name); kept as an alias.
+    # REQUIRED, but either spelling satisfies it. Making both plain optionals meant `deploy --kind
+    # strategy` reached _deploy with strategy=None and died on a TypeError from os.path.exists,
+    # trading argparse's clean "one of the arguments is required" for a stack trace.
+    g_dep = p_dep.add_mutually_exclusive_group(required=True)
+    g_dep.add_argument("--from", dest="strategy", help="source .cs file to stage into bin\\Custom")
+    g_dep.add_argument("--strategy", dest="strategy",
+                       help="deprecated alias for --from (it is a PATH, not a class name)")
     p_dep.add_argument("--kind", default="strategy")
     p_com = sub.add_parser("compile")
     # NT's compiler always builds the WHOLE tree (same as F5), so there is nothing
@@ -726,6 +831,24 @@ def main(argv: list[str]) -> int:
     p_win = sub.add_parser("windows", help="inventory NT's top-level windows")
     p_win.add_argument("--timeout", type=float, default=30.0)
     p_win.add_argument("--offscreen", action="store_true", help="only windows that look unreachable")
+    p_reg = sub.add_parser("regions", help="find/strip DUPLICATED NinjaScript generated regions")
+    p_reg.add_argument("--root", default="", help="NT8 user dir (default: auto)")
+    p_reg.add_argument("--strip", action="store_true", help="remove them (NT regenerates one)")
+    p_reg.add_argument("--all", action="store_true", dest="all_files",
+                       help="strip every region, not just duplicated ones")
+    p_rst = sub.add_parser("restart", help="restart NinjaTrader (required after reload before a bake)")
+    p_rst.add_argument("--task", default=ntrestart.DEFAULT_TASK,
+                       help="Scheduled Task to run instead of launching the exe. Create it with "
+                            "/IT so it reaches the interactive session (required for UI automation "
+                            "from an SSH/session-0 shell).")
+    p_rst.add_argument("--exe", default=ntrestart.DEFAULT_EXE,
+                       help="NinjaTrader executable to launch. No default: on a box that starts NT "
+                            "through a credential-supplying wrapper, the bare exe stops at the "
+                            "Welcome screen and a running-check still reads healthy.")
+    p_rst.add_argument("--wait", type=float, default=120.0, help="seconds to wait for NT to come back")
+    p_rst.add_argument("--stop-timeout", dest="stop_timeout", type=float, default=60.0,
+                       help="seconds to wait for NT to stop before giving up (it will NOT launch a "
+                            "second instance if the stop fails)")
     p_bt = sub.add_parser("backtest")
     p_bt.add_argument("--config", required=True)
     p_bt.add_argument("--timeout", type=float, default=120.0)
@@ -871,6 +994,10 @@ def main(argv: list[str]) -> int:
         return _reload(args.timeout)
     if args.command == "windows":
         return _windows(args.timeout, args.offscreen)
+    if args.command == "regions":
+        return _regions(args.root, args.strip, args.all_files)
+    if args.command == "restart":
+        return _restart(args.task, args.exe, args.wait, args.stop_timeout)
     if args.command == "backtest":
         return _backtest(args.config, args.timeout, args.pdf)
     if args.command == "account":
