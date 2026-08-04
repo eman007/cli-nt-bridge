@@ -153,6 +153,14 @@ namespace NinjaTrader.NinjaScript.AddOns
                     WriteResult("connections_" + id + ".json", RunConnections(id));
                 else if (kind == "reconnect")
                     WriteResult("reconnect_" + id + ".json", RunReconnect(id, ExtractJsonString(text, "connection")));
+                else if (kind == "playback")
+                    WriteResult("playback_" + id + ".json", RunPlayback(id, ExtractJsonString(text, "instrument")));
+                else if (kind == "ntstatus")
+                    WriteResult("ntstatus_" + id + ".json", RunNtStatus(id));
+                else if (kind == "workspace")
+                    WriteResult("workspace_" + id + ".json", RunWorkspace(id));
+                else if (kind == "screenshot")
+                    WriteResult("screenshot_" + id + ".json", RunScreenshot(id, text));
                 else if (kind == "peek")
                     WriteResult("peek_" + id + ".json", RunPeek(id));
                 else if (kind == "probe")
@@ -196,6 +204,10 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (kind == "backtest") return "backtest_";
             if (kind == "connections") return "connections_";
             if (kind == "reconnect") return "reconnect_";
+            if (kind == "playback") return "playback_";
+            if (kind == "ntstatus") return "ntstatus_";
+            if (kind == "workspace") return "workspace_";
+            if (kind == "screenshot") return "screenshot_";
             if (kind == "peek") return "peek_";
             if (kind == "probe") return "probe_";
             if (kind == "configure") return "configure_";
@@ -208,6 +220,591 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (kind == "marketReplayDump") return "marketReplayDump_";
             if (kind == "marketReplayDownload") return "marketReplayDownload_";
             return "compile_";
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════════════════════════
+        //  READ-ONLY STATE COMMANDS  (playback · ntstatus · workspace)
+        //
+        //  WHY THESE EXIST — 2026-08-02, and each one is tied to a failure that actually cost a day.
+        //    A Gate 3 equivalence run compared two boxes proven byte-identical in every input we had made
+        //    hashable: code (muster), replay .nrd, historical bars, and the chart+strategy blob. It still
+        //    diverged. The cause was in none of them — it was the transport state inside a running NT:
+        //    one box's replay clock was parked at the range start, the other's was 27 h in and moving, so
+        //    the same Reset() call seeked on one and no-opped on the other.
+        //
+        //    ⭐ THE PATTERN: every input we could verify was a FILE. Everything still diverging lives only
+        //    in a running NinjaTrader — no file, no hash, no read-back — and so was set by hand, per box,
+        //    at different moments. We were verifying what was easy to verify. These three commands give
+        //    that state a read-back, which is the whole prerequisite for ever trusting it.
+        //
+        //    ⭐ THE SCALING ARGUMENT: the Watch is SIX replay workers. Any input that needs a GUI click per
+        //    box cannot be held equal across a matrix, and any check that needs an eye on a screen cannot
+        //    be run across one either. Read-only first — these three answer questions, they change nothing.
+        //
+        //  Each maps to a specific incident:
+        //    playback   — the divergence above, and the Playback range silently reverting across restarts
+        //    ntstatus   — a STALE DLL ran an entire 33-minute cell while the source on disk said otherwise
+        //    workspace  — two runs where the strategy was silently disabled (toggling Playback disables it)
+        // ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+        private const BindingFlags BFStatic = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+        // Long enough that a real replay clock provably moves (400 ms at 100x is 40 replay-seconds), short
+        // enough that a status call stays snappy. Same constant, same reasoning, as the Conductor pre-flight.
+        private const int PlaybackSampleMs = 400;
+        private static string NtCoreVersion()
+        {
+            try { return typeof(Connection).Assembly.GetName().Version.ToString(); } catch { return ""; }
+        }
+
+        // ── playback ────────────────────────────────────────────────────────────────────────────────────
+        //  Connection state + the replay clock + speed + what the .nrd files on disk actually cover.
+        //
+        //  ⚠ Reflection, not a direct reference — the same reasoning as SentinelConductor: PlaybackAdapter's
+        //  members are internal-ish, and NinjaTrader compiles every .cs under bin\Custom into ONE assembly,
+        //  so a hard binding would turn any NT API change into a whole-suite compile break. Reflection
+        //  degrades to nulls in the JSON instead.
+        //
+        //  ⭐ `movingSec` is the field this was written for. A single clock reading cannot distinguish a
+        //  parked transport from a running one, and that distinction is exactly what broke Gate 3. Two
+        //  samples a real gap apart can. REPORT THE OUTCOME, NOT THE INTENT.
+        private string RunPlayback(string id, string instrument)
+        {
+            var sb = new StringBuilder();
+            try
+            {
+                Type pb = typeof(Connection).Assembly.GetType("NinjaTrader.Adapter.PlaybackAdapter", false);
+                PropertyInfo piSpeed = pb != null ? pb.GetProperty("PlaybackSpeed", BFStatic) : null;
+                PropertyInfo piNowEst = pb != null ? pb.GetProperty("NowEst", BFStatic) : null;
+                FieldInfo fiMaxSpeed = pb != null ? pb.GetField("MaxSpeedValue", BFStatic) : null;
+                MethodInfo miMinMax = pb != null
+                    ? pb.GetMethod("GetReplayMinMaxDates", BFStatic, null,
+                        new[] { typeof(string), typeof(DateTime).MakeByRefType(), typeof(DateTime).MakeByRefType() }, null)
+                    : null;
+                PropertyInfo piConn = typeof(Connection).GetProperty("PlaybackConnection", BFStatic);
+
+                object speed = null, maxSpeed = null;
+                try { if (piSpeed != null) speed = piSpeed.GetValue(null); } catch (Exception ex) { LogSafe("playback speed: " + ex.Message); }
+                try { if (fiMaxSpeed != null) maxSpeed = fiMaxSpeed.GetValue(null); } catch (Exception ex) { LogSafe("playback maxspeed: " + ex.Message); }
+
+                // Two clock samples, a real gap apart — parked vs running (see above).
+                DateTime? c1 = ReadClock(piNowEst);
+                Thread.Sleep(PlaybackSampleMs);
+                DateTime? c2 = ReadClock(piNowEst);
+                double movingSec = (c1.HasValue && c2.HasValue) ? (c2.Value - c1.Value).TotalSeconds : 0.0;
+
+                string connStatus = "none";
+                bool connected = false;
+                try
+                {
+                    var c = piConn != null ? piConn.GetValue(null) as Connection : null;
+                    if (c != null) { connStatus = c.Status.ToString(); connected = c.Status == ConnectionStatus.Connected; }
+                }
+                catch (Exception ex) { LogSafe("playback conn: " + ex.Message); }
+
+                sb.Append("{\"id\":").Append(JsonStr(id))
+                  .Append(",\"status\":\"ok\",\"ts\":").Append(JsonStr(DateTime.UtcNow.ToString("o")))
+                  .Append(",\"transportResolved\":").Append(pb != null ? "true" : "false")
+                  .Append(",\"connection\":{\"status\":").Append(JsonStr(connStatus))
+                  .Append(",\"connected\":").Append(connected ? "true" : "false").Append("}")
+                  .Append(",\"clockEst\":").Append(c2.HasValue ? JsonStr(c2.Value.ToString("o")) : "null")
+                  .Append(",\"clockEstFirst\":").Append(c1.HasValue ? JsonStr(c1.Value.ToString("o")) : "null")
+                  .Append(",\"sampleMs\":").Append(PlaybackSampleMs.ToString(InvCi))
+                  .Append(",\"movingSec\":").Append(movingSec.ToString("0.###", InvCi))
+                  .Append(",\"moving\":").Append(movingSec > 2.0 ? "true" : "false")
+                  .Append(",\"speed\":").Append(speed is int ? ((int)speed).ToString(InvCi) : "null")
+                  .Append(",\"maxSpeedValue\":").Append(maxSpeed is int ? ((int)maxSpeed).ToString(InvCi) : "null");
+
+                // Coverage — what the .nrd files actually contain, from NT's own reader. The Playback
+                // slider is NOT this: its bounds are the CONNECTION range you typed, not indexed data,
+                // and misreading it as proof of loaded data cost hours on 2026-08-02.
+                sb.Append(",\"coverage\":");
+                AppendCoverage(sb, miMinMax, instrument);
+                sb.Append("}");
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"errors\":[{\"code\":\"BRIDGE\",\"message\":"
+                     + JsonStr(ex.GetType().Name + ": " + ex.Message) + "}]}";
+            }
+        }
+
+        private static DateTime? ReadClock(PropertyInfo piNowEst)
+        {
+            try { if (piNowEst != null) return (DateTime)piNowEst.GetValue(null); } catch { }
+            return null;
+        }
+
+        // Per-instrument .nrd spans. `instrument` null/empty => every instrument folder under db\replay.
+        private void AppendCoverage(StringBuilder sb, MethodInfo miMinMax, string instrument)
+        {
+            sb.Append("[");
+            if (miMinMax == null) { sb.Append("]"); return; }
+            bool firstInstr = true;
+            try
+            {
+                string root = Path.Combine(Globals.UserDataDir, "db", "replay");
+                if (!Directory.Exists(root)) { sb.Append("]"); return; }
+                string[] dirs = string.IsNullOrEmpty(instrument)
+                    ? Directory.GetDirectories(root)
+                    : new[] { Path.Combine(root, instrument) };
+                foreach (string dir in dirs)
+                {
+                    if (!Directory.Exists(dir)) continue;
+                    string[] files = Directory.GetFiles(dir, "*.nrd");
+                    Array.Sort(files);
+                    DateTime lo = DateTime.MaxValue, hi = DateTime.MinValue;
+                    int ok = 0, bad = 0;
+                    var days = new StringBuilder();
+                    foreach (string f in files)
+                    {
+                        DateTime a = DateTime.MinValue, b = DateTime.MinValue;
+                        bool read = false;
+                        try
+                        {
+                            object[] args = new object[] { f, DateTime.MinValue, DateTime.MinValue };
+                            miMinMax.Invoke(null, args);
+                            a = (DateTime)args[1]; b = (DateTime)args[2];
+                            read = true;
+                        }
+                        catch { }
+                        if (days.Length > 0) days.Append(",");
+                        days.Append("{\"file\":").Append(JsonStr(Path.GetFileNameWithoutExtension(f)))
+                            .Append(",\"readable\":").Append(read ? "true" : "false")
+                            .Append(",\"from\":").Append(read ? JsonStr(a.ToString("o")) : "null")
+                            .Append(",\"to\":").Append(read ? JsonStr(b.ToString("o")) : "null")
+                            .Append(",\"bytes\":").Append(SafeLen(f).ToString(InvCi)).Append("}");
+                        if (read) { ok++; if (a < lo) lo = a; if (b > hi) hi = b; } else bad++;
+                    }
+                    if (!firstInstr) sb.Append(",");
+                    firstInstr = false;
+                    sb.Append("{\"instrument\":").Append(JsonStr(Path.GetFileName(dir)))
+                      .Append(",\"files\":").Append(files.Length.ToString(InvCi))
+                      .Append(",\"readable\":").Append(ok.ToString(InvCi))
+                      .Append(",\"unreadable\":").Append(bad.ToString(InvCi))
+                      .Append(",\"from\":").Append(ok > 0 ? JsonStr(lo.ToString("o")) : "null")
+                      .Append(",\"to\":").Append(ok > 0 ? JsonStr(hi.ToString("o")) : "null")
+                      .Append(",\"days\":[").Append(days).Append("]}");
+                }
+            }
+            catch (Exception ex) { LogSafe("AppendCoverage: " + ex.Message); }
+            sb.Append("]");
+        }
+
+        private static long SafeLen(string f)
+        {
+            try { return new FileInfo(f).Length; } catch { return -1; }
+        }
+
+        // ── ntstatus ────────────────────────────────────────────────────────────────────────────────────
+        //  "Is the code NinjaTrader is RUNNING the code that is on disk?"
+        //
+        //  ⭐ WHY: on 2026-08-02 a box ran Conductor v0.1.0 for 33 minutes while the source on disk said
+        //  v0.2.0b — the deploy had copied source without compiling, and every downstream conclusion from
+        //  that cell was worthless. The version chip was on screen the whole time and went unread.
+        //  A comparison of PROCESS START vs ASSEMBLY BUILD makes the same mistake impossible to miss, and
+        //  unlike the chip it can be read across six boxes in one command.
+        //
+        //  Answered from INSIDE NT deliberately: only this process knows which assembly it actually loaded.
+        //  The Python side additionally stats the DLL on disk, so the two can disagree — and that
+        //  disagreement IS the finding.
+        private string RunNtStatus(string id)
+        {
+            try
+            {
+                var proc = System.Diagnostics.Process.GetCurrentProcess();
+                DateTime procStart = proc.StartTime.ToUniversalTime();
+
+                string loadedPath = null, loadedVer = null;
+                DateTime? loadedBuilt = null;
+                try
+                {
+                    Assembly custom = null;
+                    foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        string n = a.GetName().Name;
+                        if (string.Equals(n, "NinjaTrader.Custom", StringComparison.OrdinalIgnoreCase)) { custom = a; break; }
+                    }
+                    if (custom != null)
+                    {
+                        loadedVer = custom.GetName().Version != null ? custom.GetName().Version.ToString() : null;
+                        try { loadedPath = custom.Location; } catch { }
+                        // An in-memory (byte[]-loaded) assembly has no Location — NT swaps NinjaScript in
+                        // that way on a reload, so an empty Location is INFORMATION, not an error.
+                        if (!string.IsNullOrEmpty(loadedPath) && File.Exists(loadedPath))
+                            loadedBuilt = File.GetLastWriteTimeUtc(loadedPath);
+                    }
+                }
+                catch (Exception ex) { LogSafe("ntstatus assembly: " + ex.Message); }
+
+                string dllOnDisk = Path.Combine(Globals.UserDataDir, "bin", "Custom", "NinjaTrader.Custom.dll");
+                DateTime? diskBuilt = File.Exists(dllOnDisk) ? (DateTime?)File.GetLastWriteTimeUtc(dllOnDisk) : null;
+
+                // The finding, stated rather than left for the reader to compute.
+                bool stale = diskBuilt.HasValue && diskBuilt.Value > procStart;
+
+                var sb = new StringBuilder();
+                sb.Append("{\"id\":").Append(JsonStr(id))
+                  .Append(",\"status\":\"ok\",\"ts\":").Append(JsonStr(DateTime.UtcNow.ToString("o")))
+                  .Append(",\"pid\":").Append(proc.Id.ToString(InvCi))
+                  .Append(",\"processStartUtc\":").Append(JsonStr(procStart.ToString("o")))
+                  .Append(",\"ntVersion\":").Append(JsonStr(NtCoreVersion()))
+                  .Append(",\"userDataDir\":").Append(JsonStr(Globals.UserDataDir))
+                  .Append(",\"loadedAssembly\":{\"version\":").Append(JsonStr(loadedVer))
+                  .Append(",\"location\":").Append(JsonStr(loadedPath))
+                  .Append(",\"inMemory\":").Append(string.IsNullOrEmpty(loadedPath) ? "true" : "false")
+                  .Append(",\"builtUtc\":").Append(loadedBuilt.HasValue ? JsonStr(loadedBuilt.Value.ToString("o")) : "null").Append("}")
+                  .Append(",\"dllOnDisk\":{\"path\":").Append(JsonStr(dllOnDisk))
+                  .Append(",\"builtUtc\":").Append(diskBuilt.HasValue ? JsonStr(diskBuilt.Value.ToString("o")) : "null").Append("}")
+                  .Append(",\"assemblyOlderThanDisk\":").Append(stale ? "true" : "false")
+                  .Append("}");
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"errors\":[{\"code\":\"BRIDGE\",\"message\":"
+                     + JsonStr(ex.GetType().Name + ": " + ex.Message) + "}]}";
+            }
+        }
+
+        // ── screenshot ──────────────────────────────────────────────────────────────────────────────────
+        //  LET THE OPERATOR SEE THE SCREEN.
+        //
+        //  ⭐ WHY: 2026-08-02, and this one is a process failure rather than a code failure. A replay would
+        //  not seek on one node. Every diagnosis was made by asking the user what was on their screen and
+        //  reasoning about the answer — and the reasoning was wrong repeatedly, because a relayed screen is
+        //  a lossy channel: the Playback window and the Conductor panel were displaying two DIFFERENT clock
+        //  values the whole time and nobody noticed, because nobody was looking at both at once.
+        //
+        //  A fleet of six headless replay workers cannot be operated through a human describing a window.
+        //  ⇒ Capture the pixels and ship them back. This is the read-only sibling of `windows`: that command
+        //  says a window EXISTS, this one says what it SAYS.
+        //
+        //  ⚠ MUST run inside NinjaTrader, not over SSH. SSH lands in session 0, which owns no desktop — a
+        //  capture from there returns black, and black is worse than an error because it looks like an answer.
+        //  Running in the AddOn means running in the interactive session where the pixels actually are.
+        //
+        //  ⚠ GDI, not WPF rendering. RenderTargetBitmap would need each window's own dispatcher (NT is
+        //  multi-UI-threaded) and would miss child HWNDs and the DWM composition. PrintWindow with
+        //  PW_RENDERFULLCONTENT captures what is genuinely on screen, and Win32 is thread-agnostic — the
+        //  same reason `windows` enumerates via EnumWindows rather than Globals.AllWindows.
+        private const uint PW_RENDERFULLCONTENT = 0x00000002;
+        private const int SRCCOPY = 0x00CC0020;
+
+        private string RunScreenshot(string id, string triggerJson)
+        {
+            string title = ExtractJsonString(triggerJson, "title");
+            string hwndStr = ExtractJsonString(triggerJson, "hwnd");
+            string outPath = ExtractJsonString(triggerJson, "out");
+
+            try { SetProcessDPIAware(); } catch { }
+
+            IntPtr target = IntPtr.Zero;
+            string matched = null;
+            long parsed;
+            if (!string.IsNullOrEmpty(hwndStr) && long.TryParse(hwndStr, out parsed))
+            {
+                target = new IntPtr(parsed);
+                var tb = new StringBuilder(400);
+                GetWindowText(target, tb, tb.Capacity);
+                matched = tb.ToString();
+            }
+            else if (!string.IsNullOrEmpty(title))
+            {
+                // Substring, case-insensitive — a caller should not have to know a window's exact caption,
+                // and NT retitles windows as their content changes.
+                var found = new List<KeyValuePair<IntPtr, string>>();
+                uint self = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+                EnumWindowsProc cb = delegate(IntPtr h, IntPtr lp)
+                {
+                    try
+                    {
+                        uint pid; GetWindowThreadProcessId(h, out pid);
+                        if (pid != self || !IsWindow(h) || !IsWindowVisible(h)) return true;
+                        var tb2 = new StringBuilder(400);
+                        GetWindowText(h, tb2, tb2.Capacity);
+                        string t = tb2.ToString();
+                        if (t.Length > 0 && t.IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0)
+                            found.Add(new KeyValuePair<IntPtr, string>(h, t));
+                    }
+                    catch { }
+                    return true;
+                };
+                EnumWindows(cb, IntPtr.Zero);
+                GC.KeepAlive(cb);
+                if (found.Count == 0)
+                    return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"errors\":[{\"code\":\"BRIDGE\",\"message\":"
+                         + JsonStr("no visible window matching '" + title + "'") + "}]}";
+                target = found[0].Key;
+                matched = found[0].Value;
+            }
+
+            int x = 0, y = 0, w, h2;
+            bool fullScreen = target == IntPtr.Zero;
+            if (fullScreen)
+            {
+                // Virtual screen: every monitor, including negative-origin ones.
+                x = GetSystemMetrics(76); y = GetSystemMetrics(77);
+                w = GetSystemMetrics(78); h2 = GetSystemMetrics(79);
+                matched = "(virtual screen)";
+            }
+            else
+            {
+                BridgeRect r;
+                if (!GetWindowRect(target, out r))
+                    return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"errors\":[{\"code\":\"BRIDGE\",\"message\":\"GetWindowRect failed\"}]}";
+                w = r.Right - r.Left; h2 = r.Bottom - r.Top; x = r.Left; y = r.Top;
+                // A minimized window has a real HWND and nonsense geometry. Say so rather than return an
+                // 8x8 sliver that looks like a failed render.
+                if (IsIconic(target) || w <= 0 || h2 <= 0)
+                    return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"errors\":[{\"code\":\"BRIDGE\",\"message\":"
+                         + JsonStr("window is minimized or has no area (" + w + "x" + h2 + ") — restore it first") + "}]}";
+            }
+
+            if (string.IsNullOrEmpty(outPath))
+                outPath = Path.Combine(Globals.UserDataDir, "NT8Bridge", "result", "shot_" + id + ".png");
+
+            IntPtr srcDc = IntPtr.Zero, memDc = IntPtr.Zero, bmp = IntPtr.Zero, old = IntPtr.Zero;
+            try
+            {
+                srcDc = fullScreen ? GetDC(IntPtr.Zero) : GetWindowDC(target);
+                if (srcDc == IntPtr.Zero) throw new Exception("could not get a device context");
+                memDc = CreateCompatibleDC(srcDc);
+                bmp = CreateCompatibleBitmap(srcDc, w, h2);
+                old = SelectObject(memDc, bmp);
+
+                bool ok = false;
+                if (!fullScreen)
+                    ok = PrintWindow(target, memDc, PW_RENDERFULLCONTENT);
+                if (!ok)
+                    // Fallback: blit from the screen DC. Captures whatever is actually visible, so an
+                    // occluded window comes back occluded — which is the truth, not a defect.
+                    ok = BitBlt(memDc, 0, 0, w, h2, fullScreen ? srcDc : GetDC(IntPtr.Zero), x, y, SRCCOPY);
+                if (!ok) throw new Exception("both PrintWindow and BitBlt failed");
+
+                var src = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+                    bmp, IntPtr.Zero, System.Windows.Int32Rect.Empty,
+                    System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
+                var enc = new System.Windows.Media.Imaging.PngBitmapEncoder();
+                enc.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(src));
+
+                string dir = Path.GetDirectoryName(outPath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                using (var fs = new FileStream(outPath, FileMode.Create, FileAccess.Write))
+                    enc.Save(fs);
+
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"ok\",\"ts\":" + JsonStr(DateTime.UtcNow.ToString("o"))
+                     + ",\"path\":" + JsonStr(outPath)
+                     + ",\"window\":" + JsonStr(matched)
+                     + ",\"hwnd\":" + target.ToInt64().ToString(InvCi)
+                     + ",\"width\":" + w.ToString(InvCi) + ",\"height\":" + h2.ToString(InvCi)
+                     + ",\"bytes\":" + SafeLen(outPath).ToString(InvCi) + "}";
+            }
+            catch (Exception ex)
+            {
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"errors\":[{\"code\":\"BRIDGE\",\"message\":"
+                     + JsonStr(ex.GetType().Name + ": " + ex.Message) + "}]}";
+            }
+            finally
+            {
+                try { if (old != IntPtr.Zero) SelectObject(memDc, old); } catch { }
+                try { if (bmp != IntPtr.Zero) DeleteObject(bmp); } catch { }
+                try { if (memDc != IntPtr.Zero) DeleteDC(memDc); } catch { }
+                try { if (srcDc != IntPtr.Zero) ReleaseDC(fullScreen ? IntPtr.Zero : target, srcDc); } catch { }
+            }
+        }
+
+        // ── workspace ───────────────────────────────────────────────────────────────────────────────────
+        //  What is actually ON each chart: instrument, bar type, indicators, strategies + their State.
+        //
+        //  ⭐ WHY: two Gate 3 runs were lost to a strategy that was silently DISABLED — toggling the
+        //  Playback connection disables chart strategies, and on an unattended boot a workspace can restore
+        //  with the strategy off. That looks identical to a healthy run until the corpus comes back empty.
+        //  "Is my strategy enabled on both boxes?" should be one command, not an RDP session per box.
+        //
+        //  ⚠ NT IS MULTI-UI-THREADED — every window owns its own dispatcher, and reading a WPF member from
+        //  the poller thread throws "the calling thread cannot access this object" for EVERY window. So:
+        //  snapshot Globals.AllWindows (a plain collection — safe), then marshal to EACH window's OWN
+        //  dispatcher to read it. A short timeout per window so one busy chart cannot wedge the bridge.
+        //
+        //  ⚠ Read by REFLECTION with the resolved member recorded. NT's chart object model is not part of
+        //  the documented NinjaScript surface, so a hard binding is both a compile risk and a silent-wrong
+        //  risk across versions. When a member does not resolve the JSON says so rather than reporting an
+        //  empty chart — an absent reading and a zero reading are not the same claim.
+        private string RunWorkspace(string id)
+        {
+            var charts = new List<string>();
+            var notes = new List<string>();
+            try
+            {
+                var snap = new List<Window>();
+                try
+                {
+                    var all = Globals.AllWindows;
+                    if (all != null) for (int i = 0; i < all.Count; i++) snap.Add(all[i]);
+                }
+                catch (Exception ex) { notes.Add("AllWindows snapshot: " + ex.Message); }
+
+                foreach (Window w in snap)
+                {
+                    if (w == null) continue;
+                    string tn;
+                    try { tn = w.GetType().FullName; } catch { continue; }
+                    if (tn == null || tn.IndexOf("Chart", StringComparison.Ordinal) < 0) continue;
+                    if (tn.IndexOf("ChartTrader", StringComparison.Ordinal) >= 0) continue;
+
+                    Window win = w;
+                    string row = null;
+                    try
+                    {
+                        var op = win.Dispatcher.BeginInvoke(new Func<string>(delegate { return DescribeChart(win); }));
+                        // Bounded wait: a chart mid-render must not hold the poller. Silence is reported,
+                        // not swallowed — a window we could not read is a fact worth returning.
+                        if (op.Wait(TimeSpan.FromSeconds(5)) == System.Windows.Threading.DispatcherOperationStatus.Completed)
+                            row = op.Result as string;
+                        else
+                            notes.Add("chart window did not answer within 5s: " + tn);
+                    }
+                    catch (Exception ex) { notes.Add("chart read (" + tn + "): " + ex.Message); }
+                    if (row != null) charts.Add(row);
+                }
+            }
+            catch (Exception ex)
+            {
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"charts\":[],\"errors\":[{\"code\":\"BRIDGE\",\"message\":"
+                     + JsonStr(ex.GetType().Name + ": " + ex.Message) + "}]}";
+            }
+
+            var sb = new StringBuilder();
+            sb.Append("{\"id\":").Append(JsonStr(id))
+              .Append(",\"status\":\"ok\",\"ts\":").Append(JsonStr(DateTime.UtcNow.ToString("o")))
+              .Append(",\"workspace\":").Append(JsonStr(CurrentWorkspaceName()))
+              .Append(",\"chartCount\":").Append(charts.Count.ToString(InvCi))
+              .Append(",\"charts\":[").Append(string.Join(",", charts.ToArray())).Append("]")
+              .Append(",\"notes\":[");
+            for (int i = 0; i < notes.Count; i++) { if (i > 0) sb.Append(","); sb.Append(JsonStr(notes[i])); }
+            sb.Append("]}");
+            return sb.ToString();
+        }
+
+        // Reflected, not bound: the member has moved across NT builds and is not worth a compile break.
+        private static string CurrentWorkspaceName()
+        {
+            string[] names = { "CurrentWorkspace", "Workspace", "WorkspaceName" };
+            foreach (string n in names)
+            {
+                try
+                {
+                    PropertyInfo pi = typeof(Globals).GetProperty(n, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                    if (pi != null)
+                    {
+                        object v = pi.GetValue(null, null);
+                        if (v != null) return Convert.ToString(v);
+                    }
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        // MUST be called on the chart window's OWN dispatcher (see RunWorkspace).
+        private string DescribeChart(Window win)
+        {
+            var sb = new StringBuilder();
+            string title = null;
+            try { title = win.Title; } catch { }
+            sb.Append("{\"title\":").Append(JsonStr(title))
+              .Append(",\"type\":").Append(JsonStr(SafeTypeName(win)));
+
+            object cc = FirstMember(win, new[] { "ActiveChartControl", "ChartControl" });
+            if (cc == null)
+            {
+                sb.Append(",\"chartControlResolved\":false,\"instrument\":null,\"barsPeriod\":null")
+                  .Append(",\"indicators\":null,\"strategies\":null}");
+                return sb.ToString();
+            }
+            sb.Append(",\"chartControlResolved\":true");
+
+            object instr = FirstMember(cc, new[] { "Instrument" });
+            object bp = FirstMember(cc, new[] { "BarsPeriod" });
+            sb.Append(",\"instrument\":").Append(JsonStr(instr != null ? Convert.ToString(instr) : null))
+              .Append(",\"barsPeriod\":").Append(JsonStr(bp != null ? Convert.ToString(bp) : null));
+
+            sb.Append(",\"indicators\":");
+            AppendNsList(sb, FirstMember(cc, new[] { "Indicators" }));
+            sb.Append(",\"strategies\":");
+            AppendNsList(sb, FirstMember(cc, new[] { "Strategies" }));
+
+            sb.Append("}");
+            return sb.ToString();
+        }
+
+        // NinjaScript objects (indicators/strategies) as {name, state, enabled}. `state` is NT's own State
+        // enum verbatim — Active/Realtime/Historical/Terminated — because the raw value is the evidence and
+        // any collapsing of it into a boolean is a claim we would then have to defend.
+        private void AppendNsList(StringBuilder sb, object list)
+        {
+            if (list == null) { sb.Append("null"); return; }
+            sb.Append("[");
+            try
+            {
+                var en = list as IEnumerable;
+                if (en != null)
+                {
+                    bool first = true;
+                    foreach (object o in en)
+                    {
+                        if (o == null) continue;
+                        string nm = null, st = null;
+                        // ⚠ A Sentinel tool BLANKS its own Name at DataLoaded (that is how the on-chart label
+                        // is hidden — the label IS the Name property), so `Name` is legitimately "" for most
+                        // of this suite. Fall back to the type name, or every row reads as anonymous and any
+                        // caller matching on name matches nothing. Found by running this against sentry-2.
+                        try { object v = FirstMember(o, new[] { "Name" }); nm = Convert.ToString(v); } catch { }
+                        if (string.IsNullOrEmpty(nm)) nm = SafeTypeName(o);
+                        try { object v = FirstMember(o, new[] { "State" }); st = v != null ? Convert.ToString(v) : null; } catch { }
+                        if (!first) sb.Append(",");
+                        first = false;
+                        sb.Append("{\"name\":").Append(JsonStr(nm))
+                          .Append(",\"type\":").Append(JsonStr(SafeTypeName(o)))
+                          .Append(",\"state\":").Append(JsonStr(st))
+                          .Append(",\"enabled\":").Append(st == "Active" || st == "Realtime" || st == "Historical" ? "true" : "false")
+                          .Append("}");
+                    }
+                }
+            }
+            catch (Exception ex) { LogSafe("AppendNsList: " + ex.Message); }
+            sb.Append("]");
+        }
+
+        private static string SafeTypeName(object o)
+        {
+            try { return o != null ? o.GetType().Name : null; } catch { return null; }
+        }
+
+        // First of the candidate property/field names that resolves on this object, else null.
+        private static object FirstMember(object target, string[] names)
+        {
+            if (target == null) return null;
+            Type t;
+            try { t = target.GetType(); } catch { return null; }
+            const BindingFlags bf = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            foreach (string n in names)
+            {
+                try
+                {
+                    PropertyInfo pi = t.GetProperty(n, bf);
+                    if (pi != null && pi.CanRead) { object v = pi.GetValue(target, null); if (v != null) return v; }
+                }
+                catch { }
+                try
+                {
+                    FieldInfo fi = t.GetField(n, bf);
+                    if (fi != null) { object v = fi.GetValue(target); if (v != null) return v; }
+                }
+                catch { }
+            }
+            return null;
         }
 
         private string RunCompile(string id)
@@ -276,6 +873,23 @@ namespace NinjaTrader.NinjaScript.AddOns
         [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr p);
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+
+        // ── screenshot P/Invoke ─────────────────────────────────────────────────────────────────────────
+        //  GDI, not System.Drawing: the encode goes through WPF's PngBitmapEncoder (PresentationCore, which
+        //  this suite already depends on everywhere) so nothing new has to be referenced to build.
+        [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr h);
+        [DllImport("user32.dll")] private static extern IntPtr GetWindowDC(IntPtr h);
+        [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr h, IntPtr dc);
+        [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+        [DllImport("user32.dll")] private static extern int GetSystemMetrics(int i);
+        [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
+        [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
+        [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleBitmap(IntPtr dc, int w, int h);
+        [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+        [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
+        [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr dc);
+        [DllImport("gdi32.dll")] private static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h,
+                                                                   IntPtr src, int sx, int sy, int rop);
 
         private string RunWindows(string id)
         {

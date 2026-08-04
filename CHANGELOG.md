@@ -4,6 +4,68 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-08-04
+
+Four **read-only** commands that answer questions which previously required an RDP session. Each one
+exists because of a specific failure that cost real time; none of them mutate NinjaTrader state.
+
+Numbered 1.5.0 to stay clear of the in-flight 1.4.0 (`regions` + `restart`). This release does not
+depend on it and can merge in either order — say the word and it renumbers.
+
+### Added
+
+- **`playback` — replay transport state.** Connection, replay clock, speed, and per-`.nrd` coverage
+  via NinjaTrader's own `GetReplayMinMaxDates`. **The clock is sampled twice, a real gap apart**, and
+  the delta is reported as `movingSec`: a single reading cannot distinguish a parked transport from a
+  running one, and that distinction blocked a replay-equivalence gate for a day — the same seek landed
+  on a parked clock and silently no-opped on a moving one. `--require-ready` turns the report into an
+  assertion (exit 2) for bake scripts; reporting stays the default, because a box with no Playback
+  configured is not a failure of this command.
+
+  Coverage is read from the `.nrd` reader, **not the Playback slider** — the slider's bounds are the
+  connection range you typed, not the indexed data, and reading it as proof that data was loaded cost
+  hours on the same day.
+
+- **`ntstatus` — is NinjaTrader running the code on disk?** Process start time vs the built assembly's
+  timestamp, and it **exits 2 when the DLL is newer than the process**. This is the stale-DLL
+  condition that once ran a 33-minute cell against code the operator believed had been replaced: the
+  source on disk said one version, the running assembly was another, and every downstream conclusion
+  was drawn from the wrong build. On a timeout it degrades rather than fails — a wedged or signed-out
+  NinjaTrader is exactly when this matters, and the filesystem half of the answer is still available.
+
+- **`workspace` — charts, indicators, strategies, and their `State`.** Toggling Playback silently
+  disables chart strategies, and two runs were lost to a cell that replayed for half an hour with
+  nothing armed. Marshals to **each chart window's own dispatcher** with a bounded wait, and reports
+  `null` — never `[]` — when a member does not resolve: an unreadable chart and an empty chart are
+  different claims and must not share a representation.
+
+- **`screenshot` — capture a window (or the screen) as PNG.** A fleet of headless workers cannot be
+  operated through a human describing a window; during one incident the Playback window and a panel
+  were displaying two different clock values the whole time and nobody noticed, because nobody could
+  look at both at once. Matches by HWND or case-insensitive substring of the title.
+
+  ⚠ **It must run inside NinjaTrader.** SSH lands in session 0, which owns no desktop, and a session-0
+  capture returns **black — which looks like an answer** rather than an error. GDI `PrintWindow` with
+  `PW_RENDERFULLCONTENT`, encoded through WPF's `PngBitmapEncoder`, so no `System.Drawing` reference
+  is needed and no dispatcher is required (NinjaTrader is multi-UI-threaded; Win32 is thread-agnostic).
+
+### Notes for implementers
+
+**`PlaybackAdapter` members are bound by reflection, not directly.** NinjaTrader compiles every `.cs`
+under `bin\Custom` into one assembly, so a hard binding to an internal API turns any NinjaTrader
+change into a whole-tree compile break — which takes down every unrelated tool in the same tree.
+
+### Tests
+
+- **+17 tests**, `204 passed, 6 skipped` (1.3.0 baseline: 187). Two of them exist because driving
+  these against a live NinjaTrader within the hour found two defects in them:
+  - `playback` reported **ready** for a transport reading `2099-12-01` with nothing loaded. It was
+    stationary, so it passed the moving/not-moving test — a false green of exactly the kind this
+    command exists to eliminate.
+  - `workspace` matched strategies on `name` only. Tools that blank their own `Name` at `DataLoaded`
+    (the on-chart label *is* the `Name` property) were therefore invisible, and it found nothing on a
+    real chart. It now matches on name **or** type.
+
 ## [1.3.0] - 2026-07-30
 
 ### Added
