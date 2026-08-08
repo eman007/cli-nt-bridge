@@ -15,6 +15,10 @@ from nt8bridge import batch as ntbatch
 from nt8bridge import flatten as ntflatten
 from nt8bridge import watch as ntwatch
 from nt8bridge import connections as ntconnections
+from nt8bridge import playback as ntplayback
+from nt8bridge import screenshot as ntscreenshot
+from nt8bridge import ntstatus as ntntstatus
+from nt8bridge import workspace as ntworkspace
 from nt8bridge import reconnect as ntreconnect
 from nt8bridge import connwatch as ntconnwatch
 from nt8bridge import compile as ntcompile
@@ -64,6 +68,10 @@ Commands:
   python -m nt8bridge feedhealth --instrument 'MNQ 09-26' last-tick age (detect FROZEN feed)
   python -m nt8bridge feedwatch  --instrument 'MNQ 09-26' alert on a frozen-but-connected feed (loop)
   python -m nt8bridge connections                read connection status (live/dropped)
+  python -m nt8bridge playback                   replay transport: clock, MOVING?, speed, .nrd coverage
+  python -m nt8bridge ntstatus                   is NT running the code on disk? (catches a stale DLL)
+  python -m nt8bridge workspace                  charts + indicators + strategies AND their enabled state
+  python -m nt8bridge screenshot --title Conductor   capture a window as PNG (see the screen, don't relay it)
   python -m nt8bridge reconnect --name X         reconnect a dropped connection
   python -m nt8bridge connwatch --name X         auto-reconnect inadvertent drops (loop)
   python -m nt8bridge watchdog                   restart NT8 if it hangs/crashes
@@ -539,6 +547,92 @@ def _connections(timeout: float) -> int:
     return 0 if payload.get("status") == "ok" else 1
 
 
+def _playback(instrument: str | None, timeout: float, require_ready: bool) -> int:
+    try:
+        payload = ntplayback.run_playback(instrument, timeout=timeout)
+    except TimeoutError as e:
+        print(json.dumps({"command": "playback", "status": "timeout", "ok": False, "message": str(e)}, indent=2))
+        return 1
+    state = ntplayback.parse_playback_response(payload)
+    ready, why = state.ready_to_seek()
+    out = {"command": "playback"}
+    out.update(payload)
+    # State the judgement, do not leave the caller to derive it from movingSec. The whole point of
+    # this command is that a moving transport is not obvious from a single clock reading.
+    out["readyToSeek"] = ready
+    out["readyReason"] = why
+    print(json.dumps(out, indent=2))
+    if payload.get("status") != "ok":
+        return 1
+    # Reporting state is the default; ASSERTING it is opt-in. A box with no Playback configured is
+    # not a failure of this command, so --require-ready is what a bake script uses to make it one.
+    return 2 if (require_ready and not ready) else 0
+
+
+def _ntstatus(timeout: float) -> int:
+    try:
+        payload = ntntstatus.run_ntstatus(timeout=timeout)
+    except TimeoutError as e:
+        # Degrade rather than fail: a wedged or signed-out NT is exactly when this matters, and the
+        # filesystem half of the answer is still available.
+        built = ntntstatus.dll_built_utc()
+        print(json.dumps({
+            "command": "ntstatus", "status": "timeout", "ok": False, "message": str(e),
+            "dllOnDisk": {"path": str(ntntstatus.custom_dll_path()),
+                          "builtUtc": built.isoformat() if built else None},
+            "note": "AddOn did not answer — NT8 down, not signed in, or NT8BridgeServer not loaded. "
+                    "DLL build time above is from the filesystem.",
+        }, indent=2))
+        return 1
+    st = ntntstatus.assess(payload)
+    out = {"command": "ntstatus"}
+    out.update(payload)
+    out["stale"] = st.stale
+    out["verdict"] = st.reason
+    print(json.dumps(out, indent=2))
+    # A stale assembly is a FAILING condition, not a note: acting on it is a restart.
+    if payload.get("status") != "ok":
+        return 1
+    return 2 if st.stale else 0
+
+
+def _workspace(strategy: str | None, timeout: float) -> int:
+    try:
+        payload = ntworkspace.run_workspace(timeout=timeout)
+    except TimeoutError as e:
+        print(json.dumps({"command": "workspace", "status": "timeout", "ok": False, "message": str(e)}, indent=2))
+        return 1
+    state = ntworkspace.parse_workspace_response(payload)
+    out = {"command": "workspace"}
+    out.update(payload)
+    rc = 0 if payload.get("status") == "ok" else 1
+    if strategy:
+        ok, why = state.strategy_running(strategy)
+        out["strategyQuery"] = strategy
+        out["strategyRunning"] = ok
+        out["strategyReason"] = why
+        if rc == 0 and not ok:
+            rc = 2
+    print(json.dumps(out, indent=2))
+    return rc
+
+
+def _screenshot(title: str | None, hwnd: int | None, out: str | None, timeout: float) -> int:
+    try:
+        payload = ntscreenshot.run_screenshot(title, hwnd, out, timeout=timeout)
+    except TimeoutError as e:
+        print(json.dumps({"command": "screenshot", "status": "timeout", "ok": False, "message": str(e)}, indent=2))
+        return 1
+    result = {"command": "screenshot"}
+    result.update(payload)
+    if payload.get("status") == "ok":
+        # A valid PNG is not evidence that anything was captured — a session-0 grab produces a
+        # perfectly well-formed black frame. Flag the suspicion; the answer is to look at the image.
+        result["looksBlank"] = ntscreenshot.looks_blank(payload.get("path", ""))
+    print(json.dumps(result, indent=2))
+    return 0 if payload.get("status") == "ok" else 1
+
+
 def _reconnect(name: str, timeout: float) -> int:
     try:
         payload = ntreconnect.run_reconnect(name, timeout=timeout)
@@ -738,6 +832,21 @@ def main(argv: list[str]) -> int:
     p_watch.add_argument("--once", action="store_true", help="single scan (no loop) — for testing")
     p_conns = sub.add_parser("connections")
     p_conns.add_argument("--timeout", type=float, default=15.0)
+    p_pb = sub.add_parser("playback", help="replay transport state: clock, MOVING?, speed, .nrd coverage")
+    p_pb.add_argument("--instrument", help="limit .nrd coverage to one instrument (default: all)")
+    p_pb.add_argument("--require-ready", action="store_true",
+                      help="exit 2 unless the transport is connected, loaded and PARKED (for bake scripts)")
+    p_pb.add_argument("--timeout", type=float, default=30.0)
+    p_nts = sub.add_parser("ntstatus", help="is NT running the code on disk? exit 2 if the DLL is newer")
+    p_nts.add_argument("--timeout", type=float, default=15.0)
+    p_shot = sub.add_parser("screenshot", help="capture a window (or the whole screen) as PNG")
+    p_shot.add_argument("--title", help="substring of the window caption (case-insensitive)")
+    p_shot.add_argument("--hwnd", type=int, help="exact HWND from `windows`")
+    p_shot.add_argument("--out", help="PNG path ON THE NODE (default: NT8Bridge\\result\\shot_<id>.png)")
+    p_shot.add_argument("--timeout", type=float, default=30.0)
+    p_ws = sub.add_parser("workspace", help="charts, indicators, strategies + enabled state")
+    p_ws.add_argument("--strategy", help="assert a strategy matching this fragment is enabled (exit 2 if not)")
+    p_ws.add_argument("--timeout", type=float, default=30.0)
     p_recon = sub.add_parser("reconnect")
     p_recon.add_argument("--name", required=True, help="connection name to reconnect (REQUIRED)")
     p_recon.add_argument("--timeout", type=float, default=30.0)
@@ -849,6 +958,14 @@ def main(argv: list[str]) -> int:
         return _watch(args.name, args.grace, args.interval, args.once)
     if args.command == "connections":
         return _connections(args.timeout)
+    if args.command == "playback":
+        return _playback(args.instrument, args.timeout, args.require_ready)
+    if args.command == "ntstatus":
+        return _ntstatus(args.timeout)
+    if args.command == "screenshot":
+        return _screenshot(args.title, args.hwnd, args.out, args.timeout)
+    if args.command == "workspace":
+        return _workspace(args.strategy, args.timeout)
     if args.command == "reconnect":
         return _reconnect(args.name, args.timeout)
     if args.command == "connwatch":
