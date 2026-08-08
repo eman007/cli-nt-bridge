@@ -4,6 +4,69 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-04
+
+Stacks on 1.3.0 (`reload` + `windows`). These two commands were split out of that PR for review, and
+the review found a data-loss bug and a command that did not do what it said.
+
+### Added
+
+- **`regions` — find and strip DUPLICATED NinjaScript generated regions.** NinjaTrader appends a
+  `#region NinjaScript generated code` block when it regenerates wrappers; if the file is then edited
+  outside the NinjaScript Editor, NT appends *another* on its next pass. They accumulate silently
+  (8 copies in one file observed), and because every `.cs` under `bin\Custom` compiles into one
+  assembly, a single afflicted file takes the whole platform down with CS0111/CS0102 errors that name
+  the symbol but never the cause. `regions` reports them; `regions --strip` removes them (NT
+  regenerates exactly one on its next real build). **`compile` now warns when it sees any**, because
+  this is entirely mechanical to detect and does not belong in a human's memory of a rule.
+
+  **Detection is anchored to a real preprocessor directive** (`^[ \t]*#region …`), never a substring
+  count. A count treats any *prose mention* of the marker as a region — and the files most likely to
+  mention it are the ones whose header comment explains this very rule. A healthy file with one region
+  plus one explanatory comment counts as 2, reads as "duplicated", and a strip then truncates from the
+  **comment** to end of file. Reported against a real file where that removed 21% of it, the
+  legitimate region included.
+
+  **`--strip` writes `<path>.bak` before truncating anything.** A tool that removes the tail of
+  someone else's source needs an undo even when its matcher is correct.
+
+- **`restart` — restart the NinjaTrader process.** Some changes survive a reload: bars-type instances
+  are *not* recreated by a reload or a chart reload, so they keep executing the pre-reload assembly
+  and publishing into its static state while everything else reads the new one — a silent split that
+  nothing in NinjaTrader surfaces. Prefers a Scheduled Task (a task created with `/IT` reaches the
+  interactive session, the only way UI automation works from an SSH/session-0 shell) and falls back
+  to an explicitly-supplied executable.
+
+  **It stops NinjaTrader, confirms it stopped, and only then starts it.** The first draft launched
+  without stopping and then asked "is NinjaTrader running?" — which the *original* process answered,
+  so it reported success having restarted nothing and left two instances against one user directory.
+  A failed stop now refuses to launch, and a process still running after a successful stop refuses too
+  (a relaunch watchdog can win that race). `--stop-timeout` bounds the graceful close before it
+  escalates; the escalation is not optional, because NinjaTrader's own save-workspace prompt can block
+  a graceful close and nothing here can answer it.
+
+  **There is no default executable**, for the same reason there is no default task name and with a
+  worse failure: on a box that starts NinjaTrader through a credential-supplying wrapper, launching
+  `bin\NinjaTrader.exe` directly produces a process that stops at the Welcome screen — up, unusable,
+  and indistinguishable from healthy to a running-check. `restart` refuses when given neither
+  `--task` nor `--exe`, and it refuses *before* stopping anything.
+
+### Changed
+
+- **`deploy --strategy` renamed to `deploy --from`** (`--strategy` kept as a deprecated alias). It
+  takes a source **path** to stage into `bin\Custom`, not a class name; the old name read as a class
+  name and produced a bare `FileNotFoundError: 'MyThing'`. Passing a non-existent path now returns a
+  structured error that says what the flag wants and points at `reload` for making in-tree code live.
+  The two spellings form a **required mutually-exclusive group**, so omitting both is argparse's clean
+  error rather than a `TypeError` from inside the command.
+
+### Tests
+
+- **+23 tests** covering `regions.scan`/`strip_file` (including the comment-mentions-the-marker case,
+  the `.bak`, and `_archive` exclusion), `restart` path-selection and the stop-before-start ordering
+  (asserted against a fake that records call order, so "did it stop first" is a test rather than a
+  reading), and `deploy`'s missing-argument path. **`210 passed, 6 skipped`** (1.3.0 baseline: 187).
+
 ## [1.3.0] - 2026-07-30
 
 ### Added
