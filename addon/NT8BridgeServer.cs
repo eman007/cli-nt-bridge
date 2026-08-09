@@ -2944,7 +2944,11 @@ namespace NinjaTrader.NinjaScript.AddOns
                             }
                             else notes.Add("RefreshIndicators(bool,bool) did not resolve on this build");
                         }
-                        catch (Exception ex) { notes.Add("RefreshIndicators: " + ex.Message); }
+                        // `Explain`, not `ex.Message`: MethodInfo.Invoke wraps the real fault in a
+                        // TargetInvocationException whose message is the content-free "Exception has
+                        // been thrown by the target of an invocation." This note read exactly that
+                        // until now, which is a diagnostic that tells you nothing.
+                        catch (Exception ex) { notes.Add("RefreshIndicators: " + Explain(ex)); }
 
                         object sv = FirstMember(inst, new[] { "State" });
                         stateAfter = sv != null ? Convert.ToString(sv) : null;
@@ -3005,6 +3009,58 @@ namespace NinjaTrader.NinjaScript.AddOns
                 via = op.Result as string;
             }
             catch (Exception ex) { return ChartError(id, action, "APPLY", Explain(ex)); }
+
+            // ⭐⭐ SETTLE BEFORE JUDGING — this read used to happen immediately and LIED.
+            // Measured: adding SentinelTrend to a 2-indicator chart reported `2 -> 1`, state
+            // `Configure`, verdict "treat this as NOT applied" — while the chart a moment later held
+            // all THREE, every one at Realtime. RefreshIndicators tears the collection down and
+            // rebuilds it, so a count taken during the rebuild sees a transient that never existed as
+            // a real state.
+            // ⇒ A FALSE NEGATIVE HERE IS WORSE THAN A FALSE POSITIVE: a caller that believes "not
+            //   applied" RETRIES, and the chart ends up with duplicates of the indicator.
+            // Same lesson as applyTemplate, and as playbackctl's seek: a state observed once is not a
+            // state change. Poll until the count reaches its target and the new indicator is live,
+            // then stop; give up only after it stops improving.
+            if (action == "addIndicator" || action == "removeIndicator")
+            {
+                int want = action == "addIndicator" ? countBefore + 1 : countBefore - 1;
+                string typeWanted = indType != null ? indType.Name : null;
+                DateTime sdl = DateTime.UtcNow.AddSeconds(45);
+                int stalls = 0, bestSeen = -1;
+                while (DateTime.UtcNow < sdl)
+                {
+                    int n = -1; string st = null;
+                    try
+                    {
+                        var opS = target.Dispatcher.BeginInvoke(new Func<object[]>(delegate
+                        {
+                            object cc = FirstMember(target, new[] { "ActiveChartControl", "ChartControl" });
+                            int c = 0; string s = null;
+                            var en = FirstMember(cc, new[] { "Indicators" }) as IEnumerable;
+                            if (en != null)
+                                foreach (object o in en)
+                                {
+                                    if (o == null) continue;
+                                    c++;
+                                    if (typeWanted != null && SafeTypeName(o) == typeWanted)
+                                        s = Convert.ToString(FirstMember(o, new[] { "State" }));
+                                }
+                            return new object[] { c, s };
+                        }));
+                        if (opS.Wait(TimeSpan.FromSeconds(10))
+                            == System.Windows.Threading.DispatcherOperationStatus.Completed)
+                        { var r = (object[])opS.Result; n = (int)r[0]; st = r[1] as string; }
+                    }
+                    catch { }
+                    if (n >= 0) { countAfter = n; if (st != null) stateAfter = st; }
+                    bool live = stateAfter == "Active" || stateAfter == "Realtime"
+                             || stateAfter == "Historical" || stateAfter == "Transition";
+                    if (n == want && (action == "removeIndicator" || live)) break;
+                    if (n > bestSeen) { bestSeen = n; stalls = 0; }
+                    else if (++stalls >= 16) break;   // ~8s with no further progress
+                    try { Thread.Sleep(500); } catch { }
+                }
+            }
 
             // Verify by COUNT, not by the call returning — and for an add, ATTACHED IS NOT RUNNING.
             // Measured on a live chart: Indicators.Add + SetState(Active) leaves the indicator at
