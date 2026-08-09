@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from nt8bridge import account as ntaccount
 from nt8bridge import backtest as ntbacktest
@@ -508,13 +509,28 @@ def _histdump(args) -> int:
 
 
 def _histget(args) -> int:
+    # ⛔ REFUSE A --replay-dir THAT PRETENDS TO BE A SANDBOX. The AddOn writes into NT8's own
+    # db\replay and takes no destination from us, so pointing this at a scratch directory used to
+    # produce downloads in the LIVE corpus while the scratch stayed empty (measured 2026-08-09).
+    # The flag's real job is choosing which inventory to check for existing files; that is now
+    # --check-dir, and this one is only accepted when it names the directory writes truly go to.
+    real = nthistget.nt_replay_dir()
+    chosen = args.check_dir or args.replay_dir
+    if args.replay_dir and Path(args.replay_dir).resolve() != real.resolve():
+        print(json.dumps({
+            "command": "histget", "ok": False, "status": "refused",
+            "message": "--replay-dir does not choose where downloads are written; NT8 always "
+                       f"writes to {real}. It only selects the inventory checked for existing "
+                       "files. Re-run with --check-dir for that, or drop the flag.",
+            "writes_to": str(real), "you_passed": str(Path(args.replay_dir))}, indent=2))
+        return 2
     try:
         payload = nthistget.run_histget(
             instrument=args.instrument,
             from_date=args.from_,
             to_date=args.to,
             skip_existing=not (args.no_skip_existing or args.force),
-            replay_dir=args.replay_dir or None,
+            replay_dir=chosen or None,
             timeout=args.timeout,
         )
     except TimeoutError as e:
@@ -1364,7 +1380,8 @@ def main(argv: list[str]) -> int:
     p_hg.add_argument("--to", required=True, help="end date YYYYMMDD inclusive (ET)")
     p_hg.add_argument("--no-skip-existing", dest="no_skip_existing", action="store_true", help="re-download dates that already have a .nrd")
     p_hg.add_argument("--force", action="store_true", help="force re-download + overwrite dates that already have a .nrd (alias of --no-skip-existing)")
-    p_hg.add_argument("--replay-dir", dest="replay_dir", default="", help="db/replay dir (default: <NT8>/db/replay)")
+    p_hg.add_argument("--replay-dir", dest="replay_dir", default="", help="DEPRECATED and refused unless it names <NT8>/db/replay — it never chose where downloads land; use --check-dir")
+    p_hg.add_argument("--check-dir", dest="check_dir", default="", help="inventory to check for already-present .nrd (default: <NT8>/db/replay). Downloads ALWAYS land in <NT8>/db/replay")
     p_hg.add_argument("--timeout", type=float, default=600.0, help="AddOn wait per date, seconds (heavy MNQ days run 300-460s)")
 
     if not argv:
