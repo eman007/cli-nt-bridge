@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nt8bridge"
-version = "1.6.0"
+version = "1.7.0"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 # numpy + pyarrow are required: histdump's default engine decodes .nrd offline to parquet.

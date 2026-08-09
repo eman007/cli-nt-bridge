@@ -53,6 +53,43 @@ def build_connections_request(request_id: str) -> dict:
     return {"id": request_id, "kind": "connections"}
 
 
+def build_connect_request(request_id: str, *, action: str, name: str,
+                          confirm: bool, wait_ms: int) -> dict:
+    """CONNECT or DISCONNECT a configured connection.
+
+    `confirm` is required by the AddOn for `connect` and NOT for `disconnect`: raising a
+    connection can arm an order-capable surface, while dropping one cannot, and the safe
+    direction must never be the harder one to reach.
+
+    The AddOn's ExtractJsonString reads only QUOTED values, so waitMs goes over as a string.
+    """
+    if action not in ("connect", "disconnect"):
+        raise ValueError("action must be connect or disconnect")
+    if not name:
+        raise ValueError(f"{action} requires a connection name")
+    return {"id": request_id, "kind": "connections", "action": action,
+            "name": name, "confirm": bool(confirm), "waitMs": str(int(wait_ms))}
+
+
+def run_connect(*, action: str, name: str, confirm: bool = False,
+                wait_ms: int = 30000, timeout: float | None = None) -> dict:
+    """Raise or drop a connection, and judge it by the STATUS THAT SETTLES, not by the call.
+
+    The AddOn polls `Connection.Status` to a settled value before answering, so the client
+    wait must outlast that poll window or a success reads as a timeout.
+    """
+    if timeout is None:
+        timeout = wait_ms / 1000.0 + 20.0
+    trigger, result = ntio.ensure_bridge_dirs()
+    request_id = new_request_id()
+    ntio.atomic_write_json(
+        trigger / f"connections_{request_id}.json",
+        build_connect_request(request_id, action=action, name=name,
+                              confirm=confirm, wait_ms=wait_ms),
+    )
+    return ntio.poll_for_json(result / f"connections_{request_id}.json", timeout=timeout)
+
+
 def parse_connections_response(payload: dict) -> ConnectionsState:
     return ConnectionsState(
         ok=payload.get("status") == "ok",
