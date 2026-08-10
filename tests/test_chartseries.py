@@ -92,6 +92,29 @@ def test_run_chartseries_omits_base_value_when_absent(monkeypatch):
     assert "baseBarsPeriodValue" not in captured["obj"]["dataseries"]
 
 
-def test_run_chartseries_base_value_requires_value():
+def test_run_chartseries_sends_values_without_a_type(monkeypatch):
+    """Values must reach the AddOn even when NO --bars-type is named.
+
+    This asserts a contract CHANGE (2026-08-09). It used to raise, and that restriction made a
+    custom bars type unreachable: switching TO a custom type makes NT apply that type's own
+    defaults and discard the incoming values, so `SentinelTBars 6/24` came back as
+    `212201_0_2_...` twice. With values nested under `if bars_type:` there was no second pass
+    that could stamp them onto the already-selected type — leaving the Data Series dialog as the
+    only way, i.e. exactly the hand-work this command exists to remove.
+    """
+    captured = {}
+    monkeypatch.setattr(chartseries.ntio, "ensure_bridge_dirs", lambda: ("t", "r"))
+    monkeypatch.setattr(chartseries, "new_request_id", lambda: "rid13")
+    monkeypatch.setattr(chartseries.ntio, "atomic_write_json", lambda p, o: captured.update(obj=o))
+    monkeypatch.setattr(chartseries.ntio, "poll_for_json", lambda p, timeout=30.0: {"status": "ok"})
+    chartseries.run_chartseries(bars_value=6, bars_value2=24)
+    ds = captured["obj"]["dataseries"]
+    assert "barsPeriodType" not in ds          # no type switch was requested
+    assert ds["barsPeriodValue"] == "6"        # ...but the values still go
+    assert ds["barsPeriodValue2"] == "24"
+
+
+def test_run_chartseries_type_still_requires_a_value():
+    """A TYPE switch with no value is still refused — that guard is unchanged."""
     with pytest.raises(ValueError):
-        chartseries.run_chartseries(bars_base_value=1)
+        chartseries.run_chartseries(bars_type="Minute")
