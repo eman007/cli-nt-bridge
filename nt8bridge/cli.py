@@ -14,6 +14,7 @@ from nt8bridge import probe as ntprobe
 from nt8bridge import configure as ntconfigure
 from nt8bridge import batch as ntbatch
 from nt8bridge import flatten as ntflatten
+from nt8bridge import order as ntorder
 from nt8bridge import watch as ntwatch
 from nt8bridge import connections as ntconnections
 from nt8bridge import playback as ntplayback
@@ -542,6 +543,25 @@ def _histget(args) -> int:
     # non-zero if nothing downloaded AND something failed (so a script can gate on it)
     ok = payload.get("status") == "ok" and not payload.get("failed")
     return 0 if ok else (0 if payload.get("count") else 1)
+
+
+def _order(args) -> int:
+    try:
+        payload = ntorder.run_order(
+            args.action, timeout=args.timeout,
+            account=args.name, instrument=args.instrument, working=not args.all_states,
+            side=args.side, type=args.type, tif=args.tif, quantity=args.quantity,
+            limitPrice=args.limit_price, stopPrice=args.stop_price,
+            orderId=args.order_id, name=args.order_name, oco=args.oco,
+            settle=args.settle, all=args.all, confirm=args.confirm,
+        )
+    except (TimeoutError, ValueError) as e:
+        print(json.dumps({"command": "order", "ok": False, "message": str(e)}, indent=2))
+        return 2 if isinstance(e, ValueError) else 1
+    out = {"command": "order"}
+    out.update(payload)
+    print(json.dumps(out, indent=2))
+    return 0 if payload.get("status") == "ok" else 1
 
 
 def _flatten(name: str, instrument: str, timeout: float) -> int:
@@ -1171,6 +1191,33 @@ def main(argv: list[str]) -> int:
     p_conf = sub.add_parser("configure")
     p_conf.add_argument("--config", required=True, help="config.json with params to apply to the SA tab")
     p_conf.add_argument("--timeout", type=float, default=30.0)
+    p_ord = sub.add_parser("order")
+    p_ord.add_argument("--action", default="list",
+                       help="api | list | status | place | cancel | change")
+    p_ord.add_argument("--name", default="", help="account, e.g. Sim101 (REQUIRED to mutate)")
+    p_ord.add_argument("--instrument", default="", help="e.g. 'MNQ 06-26'")
+    p_ord.add_argument("--all-states", action="store_true",
+                       help="list: include terminal orders (default: working only)")
+    p_ord.add_argument("--side", default="", help="place: Buy | Sell | BuyToCover | SellShort")
+    p_ord.add_argument("--type", default="", help="place: Market | Limit | StopMarket | StopLimit | MIT")
+    p_ord.add_argument("--tif", default="", help="place: Day (default) | Gtc | Ioc | Opg | Gtd")
+    # ⛔ These default to None, NOT 0. `change` treats an absent field as "leave alone", and a
+    # default of 0 turns every omitted field into an explicit zero — which the AddOn correctly
+    # rejected as BADQTY, and which for a price would have been a silent reprice to 0. Found by
+    # driving `change --limit-price` on a live resting order, not by reading the code.
+    p_ord.add_argument("--quantity", type=int, default=None, help="place/change: contracts")
+    p_ord.add_argument("--limit-price", type=float, default=None)
+    p_ord.add_argument("--stop-price", type=float, default=None)
+    p_ord.add_argument("--order-id", default="", help="status/cancel/change: the OrderId")
+    p_ord.add_argument("--order-name", default="", help="place: order label (default 'bridge')")
+    p_ord.add_argument("--oco", default="", help="place: OCO group id")
+    p_ord.add_argument("--settle", type=float, default=5.0,
+                       help="seconds to settle-poll the outcome (0-60)")
+    p_ord.add_argument("--all", action="store_true", help="cancel: every working order on the account")
+    p_ord.add_argument("--confirm", action="store_true",
+                       help="REQUIRED for place/cancel/change. SIM accounts only — a non-simulation "
+                            "account is refused, and this build has no escalation flag.")
+    p_ord.add_argument("--timeout", type=float, default=20.0)
     p_flat = sub.add_parser("flatten")
     p_flat.add_argument("--name", required=True, help="account to flatten, e.g. Sim101 (REQUIRED)")
     p_flat.add_argument("--instrument", default="", help="limit to one instrument, e.g. 'MNQ 06-26' (empty = all)")
@@ -1421,6 +1468,8 @@ def main(argv: list[str]) -> int:
         return _probe(args.timeout)
     if args.command == "configure":
         return _configure(args.config, args.timeout)
+    if args.command == "order":
+        return _order(args)
     if args.command == "flatten":
         return _flatten(args.name, args.instrument, args.timeout)
     if args.command == "watch":

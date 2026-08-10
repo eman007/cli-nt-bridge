@@ -178,6 +178,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     WriteResult("account_" + id + ".json", RunAccountState(id, ExtractJsonString(text, "account")));
                 else if (kind == "flatten")
                     WriteResult("flatten_" + id + ".json", RunFlatten(id, ExtractJsonString(text, "account"), ExtractJsonString(text, "instrument")));
+                else if (kind == "order")
+                    WriteResult("order_" + id + ".json", RunOrder(id, text));
                 else if (kind == "connections")
                     WriteResult("connections_" + id + ".json", RunConnections(id, text));
                 else if (kind == "reconnect")
@@ -2366,6 +2368,37 @@ namespace NinjaTrader.NinjaScript.AddOns
                                 if (!f) b.Append(","); f = false;
                                 b.Append(JsonStr("PROP " + pi.Name + " : " + pi.PropertyType.Name));
                             }
+
+                            // ⭐ WHERE DOES THE REPLAY RANGE REALLY LIVE?
+                            // Setting FromEst/ToEst on the TRANSPORT half-works: ToEst sticks, FromEst
+                            // snaps back to 2025-12-26 across two independent runs (identical to the
+                            // second). The obvious reading is that NT rebuilds the transport from the
+                            // CONNECTION's own options on connect, so the transport write is a value
+                            // with a shorter life than the thing that overwrites it. Dump the Playback
+                            // connection's ConnectOptions and find the field that actually owns it —
+                            // rather than guessing a fourth property name.
+                            foreach (ConnectOptions co in Globals.ConnectOptions)
+                            {
+                                string nm = SafeStr(delegate { return co.Name; });
+                                if (nm == null || nm.IndexOf("Playback", StringComparison.OrdinalIgnoreCase) < 0)
+                                    continue;
+                                // UNFILTERED on purpose. A name filter can only find fields someone
+                                // already guessed — the same mistake that hid "Break at EOD" until
+                                // BarsPeriod was dumped whole.
+                                if (!f) b.Append(","); f = false;
+                                b.Append(JsonStr("PLAYBACKOPT TYPE=" + co.GetType().FullName));
+                                foreach (PropertyInfo pi in co.GetType().GetProperties(
+                                             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                                {
+                                    string pn = pi.Name;
+                                    string val;
+                                    try { object v = pi.CanRead ? pi.GetValue(co, null) : null; val = v == null ? "null" : Convert.ToString(v); }
+                                    catch { val = "(threw)"; }
+                                    if (!f) b.Append(","); f = false;
+                                    b.Append(JsonStr("PLAYBACKOPT " + pn + " : " + pi.PropertyType.Name
+                                                     + (pi.CanWrite ? " [RW] = " : " [RO] = ") + val));
+                                }
+                            }
                         }
                         catch (Exception ex) { if (!f) b.Append(","); b.Append(JsonStr("ERR " + ex.Message)); }
                         b.Append("]");
@@ -2487,13 +2520,20 @@ namespace NinjaTrader.NinjaScript.AddOns
 
                         if (!string.IsNullOrEmpty(rangeType))
                         {
-                            try
+                            // ⭐ AN ENUM ERROR THAT DOES NOT NAME THE ALTERNATIVES IS A DEAD END.
+                            //    Enum.Parse says only "Requested value 'X' was not found", which leaves
+                            //    the caller guessing at a closed set the process already knows. Listing
+                            //    the legal values turns one failed call into the answer.
+                            PropertyInfo p = null;
+                            try { p = props.GetType().GetProperty("RangeType"); } catch { }
+                            if (p == null) wNotes.Add("rangeType: no RangeType property on this build");
+                            else
                             {
-                                PropertyInfo p = props.GetType().GetProperty("RangeType");
-                                object v = Enum.Parse(p.PropertyType, rangeType, true);
-                                p.SetValue(props, v, null);
+                                string legal = "";
+                                try { legal = string.Join("|", Enum.GetNames(p.PropertyType)); } catch { }
+                                try { p.SetValue(props, Enum.Parse(p.PropertyType, rangeType, true), null); }
+                                catch { wNotes.Add("rangeType: '" + rangeType + "' is not valid — this build accepts: " + legal); }
                             }
-                            catch (Exception ex) { wNotes.Add("rangeType: " + ex.Message); }
                         }
                         SetIntIfGiven(props, "DaysBack",   daysBack, wNotes);
                         SetIntIfGiven(props, "BarsBack",   barsBack, wNotes);
@@ -5227,6 +5267,540 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Every field access is wrapped so an API mismatch degrades to a null field
         // rather than throwing; the whole body is guarded so a bad call returns a
         // structured {status:"error"} instead of crashing the AddOn loop.
+        // ══════════════════════════════════════════════════════════════════════════════════════════
+        //  ORDER — the highest-risk verb family in this bridge: it can place real orders on a real
+        //  account from a headless shell with no human at the keyboard. It is therefore built
+        //  REFUSAL-FIRST, and this first cut is deliberately READ-ONLY (`api` + `list`).
+        //
+        //  Why read-only first, and it is not caution for its own sake: the mutating path needs
+        //  CreateOrder's real overload, the real name of whatever marks an account as simulated, and
+        //  the real settled-state enum. Guessing any of those produces code that compiles, runs, and
+        //  reports success while doing something else — and here "something else" is an order. The
+        //  `--api` discovery rule has already refuted two assumptions in this codebase within a
+        //  minute each; a mutating order path is the last place to stop applying it.
+        //
+        //  ⚠ `api` dumps Account and its Connection/Options UNFILTERED. A filtered dump is what hid
+        //  the answer last time ("Break at EOD" — the filter was the bug), and the whole question
+        //  here is what marks an account as SIM, which is a field nobody has yet named correctly.
+        private string RunOrder(string id, string text)
+        {
+            string action = ExtractJsonString(text, "action");
+            if (string.IsNullOrEmpty(action)) action = "list";
+
+            try
+            {
+                if (action == "api") return RunOrderApi(id);
+                if (action == "list") return RunOrderList(id, text);
+                if (action == "status") return RunOrderStatus(id, text);
+                if (action == "place") return RunOrderPlace(id, text);
+                if (action == "cancel") return RunOrderCancel(id, text);
+                if (action == "change") return RunOrderChange(id, text);
+
+                return OrderErr(id, "UNKNOWNACTION", "order action '" + action + "' does not exist. "
+                    + "Known: api, list, status, place, cancel, change.");
+            }
+            catch (Exception ex)
+            {
+                return OrderErr(id, "BRIDGE", ex.GetType().Name + ": " + Unwrap(ex));
+            }
+        }
+
+        private string OrderErr(string id, string code, string message)
+        {
+            return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"ts\":"
+                 + JsonStr(DateTime.UtcNow.ToString("o")) + ",\"orders\":[],\"errors\":[{"
+                 + "\"code\":" + JsonStr(code) + ",\"message\":" + JsonStr(message) + "}]}";
+        }
+
+        // Rule 4 of the bridge's own lessons: ex.Message on a reflection call prints the content-free
+        // "Exception has been thrown by the target of an invocation." Always unwrap.
+        private static string Unwrap(Exception ex)
+        {
+            try { return ex.InnerException != null ? ex.InnerException.Message : ex.Message; }
+            catch { return "(unreadable exception)"; }
+        }
+
+        private string RunOrderApi(string id)
+        {
+            var b = new StringBuilder();
+            b.Append("{\"id\":").Append(JsonStr(id))
+             .Append(",\"status\":\"ok\",\"ts\":").Append(JsonStr(DateTime.UtcNow.ToString("o")))
+             .Append(",\"action\":\"api\"");
+
+            Account acct = null;
+            try { lock (Account.All) { foreach (Account a in Account.All) { acct = a; break; } } } catch { }
+
+            b.Append(",\"accountName\":").Append(JsonStr(acct == null ? "" : SafeStr(delegate { return acct.Name; })));
+            b.Append(",\"account\":").Append(DumpMembers(acct, null));
+            b.Append(",\"connection\":").Append(DumpMembers(SafeProp(acct, "Connection"), null));
+            b.Append(",\"connectionOptions\":").Append(DumpMembers(SafeProp(SafeProp(acct, "Connection"), "Options"), null));
+
+            // Account METHODS — the submit/modify surface. Unfiltered on name would be hundreds of
+            // members; these five prefixes are the entire order lifecycle.
+            b.Append(",\"accountMethods\":[");
+            bool f = true;
+            try
+            {
+                if (acct != null)
+                    foreach (MethodInfo mi in acct.GetType().GetMethods(
+                                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                    {
+                        string n = mi.Name;
+                        if (n.IndexOf("Create", StringComparison.OrdinalIgnoreCase) < 0
+                            && n.IndexOf("Submit", StringComparison.OrdinalIgnoreCase) < 0
+                            && n.IndexOf("Change", StringComparison.OrdinalIgnoreCase) < 0
+                            && n.IndexOf("Cancel", StringComparison.OrdinalIgnoreCase) < 0
+                            && n.IndexOf("Flatten", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        var ps = mi.GetParameters();
+                        var sig = new StringBuilder(n).Append("(");
+                        for (int k = 0; k < ps.Length; k++)
+                        { if (k > 0) sig.Append(","); sig.Append(ps[k].ParameterType.Name).Append(" ").Append(ps[k].Name); }
+                        sig.Append(") -> ").Append(mi.ReturnType.Name);
+                        if (!f) b.Append(","); f = false;
+                        b.Append(JsonStr(sig.ToString()));
+                    }
+            }
+            catch (Exception ex) { if (!f) b.Append(","); b.Append(JsonStr("ERR " + Unwrap(ex))); }
+            b.Append("]");
+
+            // A live Order instance, if one exists — the authoritative field list for `list`/`status`,
+            // including whatever the id property is actually called.
+            Order sample = null;
+            try
+            {
+                lock (Account.All)
+                {
+                    foreach (Account a in Account.All)
+                    {
+                        lock (a.Orders) { foreach (Order o in a.Orders) { sample = o; break; } }
+                        if (sample != null) break;
+                    }
+                }
+            }
+            catch { }
+            b.Append(",\"orderSampleFound\":").Append(sample != null ? "true" : "false");
+            b.Append(",\"order\":").Append(DumpMembers(sample, null));
+
+            // The enums a caller has to spell. Emitted as the REAL member names so the client can
+            // validate input against NT rather than against a hand-copied list that drifts.
+            b.Append(",\"enums\":{");
+            b.Append("\"OrderType\":").Append(EnumNames(typeof(OrderType)));
+            b.Append(",\"OrderAction\":").Append(EnumNames(typeof(OrderAction)));
+            b.Append(",\"TimeInForce\":").Append(EnumNames(typeof(TimeInForce)));
+            b.Append(",\"OrderState\":").Append(EnumNames(typeof(OrderState)));
+            b.Append("}}");
+            return b.ToString();
+        }
+
+        private static string EnumNames(Type t)
+        {
+            var b = new StringBuilder("[");
+            try
+            {
+                string[] ns = Enum.GetNames(t);
+                for (int i = 0; i < ns.Length; i++) { if (i > 0) b.Append(","); b.Append(JsonStr(ns[i])); }
+            }
+            catch (Exception ex) { b.Append(JsonStr("ERR " + Unwrap(ex))); }
+            return b.Append("]").ToString();
+        }
+
+        // Read-only listing. `working` (default true) keeps it to live orders; pass working=false to
+        // see terminal states too. Account name is optional here BECAUSE this reads nothing and
+        // changes nothing — the mutating verbs will require it explicitly.
+        private string RunOrderList(string id, string text)
+        {
+            string acctFilter = ExtractJsonString(text, "account");
+            string instFilter = ExtractJsonString(text, "instrument");
+            bool workingOnly = ExtractJsonString(text, "working") != "false";
+
+            var b = new StringBuilder();
+            b.Append("{\"id\":").Append(JsonStr(id))
+             .Append(",\"status\":\"ok\",\"ts\":").Append(JsonStr(DateTime.UtcNow.ToString("o")))
+             .Append(",\"action\":\"list\",\"workingOnly\":").Append(workingOnly ? "true" : "false")
+             .Append(",\"orders\":[");
+
+            var rows = new List<Order>();
+            var owner = new List<string>();
+            try
+            {
+                lock (Account.All)
+                {
+                    foreach (Account a in Account.All)
+                    {
+                        string an = SafeStr(delegate { return a.Name; });
+                        if (!string.IsNullOrEmpty(acctFilter) && an != acctFilter) continue;
+                        lock (a.Orders)
+                        {
+                            foreach (Order o in a.Orders)
+                            {
+                                string st = SafeStr(delegate { return o.OrderState.ToString(); });
+                                if (workingOnly && !IsWorkingState(st)) continue;
+                                string fn = SafeStr(delegate { return o.Instrument.FullName; });
+                                if (!string.IsNullOrEmpty(instFilter) && fn != instFilter) continue;
+                                rows.Add(o); owner.Add(an);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { LogSafe("order list: " + Unwrap(ex)); }
+
+            for (int i = 0; i < rows.Count; i++)
+            {
+                Order o = rows[i];
+                if (i > 0) b.Append(",");
+                b.Append("{\"account\":").Append(JsonStr(owner[i]))
+                 .Append(",\"orderId\":").Append(JsonStr(SafeStr(delegate { return o.OrderId; })))
+                 .Append(",\"name\":").Append(JsonStr(SafeStr(delegate { return o.Name; })))
+                 .Append(",\"instrument\":").Append(JsonStr(SafeStr(delegate { return o.Instrument.FullName; })))
+                 .Append(",\"action\":").Append(JsonStr(SafeStr(delegate { return o.OrderAction.ToString(); })))
+                 .Append(",\"type\":").Append(JsonStr(SafeStr(delegate { return o.OrderType.ToString(); })))
+                 .Append(",\"state\":").Append(JsonStr(SafeStr(delegate { return o.OrderState.ToString(); })))
+                 .Append(",\"quantity\":").Append(SafeInt(delegate { return o.Quantity; }).ToString(InvCi))
+                 .Append(",\"filled\":").Append(SafeInt(delegate { return o.Filled; }).ToString(InvCi))
+                 .Append(",\"limitPrice\":").Append(SafeNum(delegate { return o.LimitPrice; }))
+                 .Append(",\"stopPrice\":").Append(SafeNum(delegate { return o.StopPrice; }))
+                 .Append(",\"avgFillPrice\":").Append(SafeNum(delegate { return o.AverageFillPrice; }))
+                 .Append(",\"tif\":").Append(JsonStr(SafeStr(delegate { return o.TimeInForce.ToString(); })))
+                 .Append(",\"oco\":").Append(JsonStr(SafeStr(delegate { return o.Oco; })))
+                 .Append("}");
+            }
+            b.Append("]}");
+            return b.ToString();
+        }
+
+        // ── the mutating half ─────────────────────────────────────────────────────────────────────
+        //  Every one of these refuses BEFORE it constructs anything. The order of the gates is the
+        //  design: confirm → account named → account found → account is SIMULATED → instrument named
+        //  → instrument resolves → side/type/quantity valid. Nothing is inferred at any step. An
+        //  omitted account does not mean "the only one"; an omitted side has no sensible default.
+        //
+        //  ⚠ THE SIM GATE READS A MUTABLE PROPERTY. `Account.Provider` came back `[RW]` from the
+        //  discovery dump, so this is a guard against ACCIDENT — a script pointed at the wrong
+        //  account name — and not against a caller determined to defeat it. Said plainly because a
+        //  guard whose strength is overestimated is worse than one whose limits are written down.
+        //  Live trading is not one flag away here: there is deliberately NO escalation parameter in
+        //  this build, so the only way to reach a live account is to edit and recompile this file.
+        private static bool IsSimAccount(Account a)
+        {
+            try { return a.Provider == Provider.Simulator; } catch { return false; }
+        }
+
+        // Terminal = the broker is done with it. Anything else may still move, and a caller must not
+        // read "not terminal yet" as failure — see the settle-poll note in OrderOutcome.
+        private static bool IsTerminalState(string st)
+        {
+            return st == "Filled" || st == "Cancelled" || st == "Rejected";
+        }
+
+        // Resolve the gates common to every mutating action. Returns null on success and sets acct;
+        // returns a ready-to-send error JSON otherwise.
+        private string OrderGate(string id, string text, out Account acct)
+        {
+            acct = null;
+            if (ExtractJsonString(text, "confirm") != "true")
+                return OrderErr(id, "CONFIRM", "refusing: this action mutates orders and requires confirm=true.");
+
+            string name = ExtractJsonString(text, "account");
+            if (string.IsNullOrEmpty(name))
+                return OrderErr(id, "NOACCOUNT", "refusing: account must be named explicitly. "
+                    + "There is no default, and 'the only account' is not a safe inference.");
+
+            Account found = null;
+            try { lock (Account.All) { foreach (Account a in Account.All) { if (a.Name == name) { found = a; break; } } } } catch { }
+            if (found == null)
+                return OrderErr(id, "NOTFOUND", "account not found: " + name);
+
+            if (!IsSimAccount(found))
+                return OrderErr(id, "NOTSIM", "REFUSING: account '" + name + "' is not a simulation account "
+                    + "(Provider=" + SafeStr(delegate { return found.Provider.ToString(); }) + "). This build places orders on "
+                    + "SIMULATED accounts only, and carries no escalation flag by design.");
+
+            acct = found;
+            return null;
+        }
+
+        // Poll an order to a settled state. ⭐ The lesson this codebase has paid for four times over:
+        // NEVER judge an NT mutation by the call. apply-template read 3 of 14, addIndicator read
+        // 2 -> 1, both mid-transition. So we poll, and — the part that matters — a still-moving order
+        // is reported as settled:false with its current state, NOT as an error. A false negative here
+        // makes a caller RETRY, and a retried order placement is a DUPLICATE ORDER.
+        private string OrderOutcome(Order o, double settleSeconds)
+        {
+            string st = "";
+            DateTime deadline = DateTime.UtcNow.AddSeconds(settleSeconds);
+            bool settled = false;
+            while (DateTime.UtcNow < deadline)
+            {
+                st = SafeStr(delegate { return o.OrderState.ToString(); });
+                if (IsTerminalState(st) || st == "Working" || st == "Accepted" || st == "TriggerPending")
+                { settled = true; break; }
+                System.Threading.Thread.Sleep(100);
+            }
+            if (string.IsNullOrEmpty(st)) st = SafeStr(delegate { return o.OrderState.ToString(); });
+
+            var b = new StringBuilder();
+            b.Append("{\"orderId\":").Append(JsonStr(SafeStr(delegate { return o.OrderId; })))
+             .Append(",\"name\":").Append(JsonStr(SafeStr(delegate { return o.Name; })))
+             .Append(",\"instrument\":").Append(JsonStr(SafeStr(delegate { return o.Instrument.FullName; })))
+             .Append(",\"action\":").Append(JsonStr(SafeStr(delegate { return o.OrderAction.ToString(); })))
+             .Append(",\"type\":").Append(JsonStr(SafeStr(delegate { return o.OrderType.ToString(); })))
+             .Append(",\"state\":").Append(JsonStr(st))
+             .Append(",\"settled\":").Append(settled ? "true" : "false")
+             .Append(",\"terminal\":").Append(IsTerminalState(st) ? "true" : "false")
+             .Append(",\"quantity\":").Append(SafeInt(delegate { return o.Quantity; }).ToString(InvCi))
+             .Append(",\"filled\":").Append(SafeInt(delegate { return o.Filled; }).ToString(InvCi))
+             .Append(",\"limitPrice\":").Append(SafeNum(delegate { return o.LimitPrice; }))
+             .Append(",\"stopPrice\":").Append(SafeNum(delegate { return o.StopPrice; }))
+             .Append(",\"avgFillPrice\":").Append(SafeNum(delegate { return o.AverageFillPrice; }))
+             .Append("}");
+            return b.ToString();
+        }
+
+        private static double SettleSecs(string text)
+        {
+            double s;
+            string raw = ExtractJsonString(text, "settle");
+            if (!string.IsNullOrEmpty(raw) && double.TryParse(raw, System.Globalization.NumberStyles.Float, InvCi, out s)
+                && s >= 0 && s <= 60) return s;
+            return 5.0;
+        }
+
+        private string RunOrderPlace(string id, string text)
+        {
+            Account acct;
+            string refusal = OrderGate(id, text, out acct);
+            if (refusal != null) return refusal;
+
+            string instName = ExtractJsonString(text, "instrument");
+            if (string.IsNullOrEmpty(instName))
+                return OrderErr(id, "NOINSTRUMENT", "refusing: instrument must be named explicitly.");
+            Instrument instr = null;
+            try { instr = Instrument.GetInstrument(instName); } catch (Exception ex) { LogSafe("order place instrument: " + Unwrap(ex)); }
+            if (instr == null)
+                return OrderErr(id, "BADINSTRUMENT", "instrument did not resolve: " + instName);
+
+            OrderAction oa;
+            if (!TryParseEnum<OrderAction>(ExtractJsonString(text, "side"), out oa))
+                return OrderErr(id, "BADSIDE", "side must be one of Buy, Sell, BuyToCover, SellShort. "
+                    + "There is no default side.");
+
+            OrderType ot;
+            if (!TryParseEnum<OrderType>(ExtractJsonString(text, "type"), out ot) || ot == OrderType.Unknown)
+                return OrderErr(id, "BADTYPE", "type must be one of Market, Limit, StopMarket, StopLimit, MIT.");
+
+            TimeInForce tif;
+            string tifRaw = ExtractJsonString(text, "tif");
+            if (string.IsNullOrEmpty(tifRaw)) tif = TimeInForce.Day;
+            else if (!TryParseEnum<TimeInForce>(tifRaw, out tif))
+                return OrderErr(id, "BADTIF", "tif must be one of Day, Gtc, Ioc, Opg, Gtd.");
+
+            int qty;
+            if (!int.TryParse(ExtractJsonString(text, "quantity"), System.Globalization.NumberStyles.Integer, InvCi, out qty) || qty <= 0)
+                return OrderErr(id, "BADQTY", "quantity must be a positive integer.");
+
+            double limit = ParsePrice(ExtractJsonString(text, "limitPrice"));
+            double stop = ParsePrice(ExtractJsonString(text, "stopPrice"));
+
+            // A price a type REQUIRES must be present. Submitting a Limit at 0 is a market order in
+            // all but name — the single most expensive way for this to "succeed".
+            if ((ot == OrderType.Limit || ot == OrderType.StopLimit) && limit <= 0)
+                return OrderErr(id, "NOLIMIT", ot.ToString() + " requires limitPrice > 0.");
+            if ((ot == OrderType.StopMarket || ot == OrderType.StopLimit || ot == OrderType.MIT) && stop <= 0)
+                return OrderErr(id, "NOSTOP", ot.ToString() + " requires stopPrice > 0.");
+
+            string oco = ExtractJsonString(text, "oco");
+            string oname = ExtractJsonString(text, "name");
+            if (string.IsNullOrEmpty(oname)) oname = "bridge";
+
+            Order ord = null;
+            try
+            {
+                ord = acct.CreateOrder(instr, oa, ot, tif, qty, limit, stop, oco ?? "", oname, null);
+            }
+            catch (Exception ex) { return OrderErr(id, "CREATE", "CreateOrder threw: " + Unwrap(ex)); }
+            if (ord == null) return OrderErr(id, "CREATE", "CreateOrder returned null.");
+
+            try { acct.Submit(new[] { ord }); }
+            catch (Exception ex) { return OrderErr(id, "SUBMIT", "Submit threw: " + Unwrap(ex)); }
+
+            LogSafe("ORDER PLACE account=" + SafeStr(delegate { return acct.Name; }) + " " + oa + " " + qty + " "
+                    + instName + " " + ot + " lmt=" + limit + " stp=" + stop + " tif=" + tif);
+
+            return "{\"id\":" + JsonStr(id) + ",\"status\":\"ok\",\"ts\":" + JsonStr(DateTime.UtcNow.ToString("o"))
+                 + ",\"action\":\"place\",\"account\":" + JsonStr(SafeStr(delegate { return acct.Name; }))
+                 + ",\"orders\":[" + OrderOutcome(ord, SettleSecs(text)) + "]}";
+        }
+
+        private string RunOrderCancel(string id, string text)
+        {
+            Account acct;
+            string refusal = OrderGate(id, text, out acct);
+            if (refusal != null) return refusal;
+
+            string orderId = ExtractJsonString(text, "orderId");
+            bool all = ExtractJsonString(text, "all") == "true";
+            if (string.IsNullOrEmpty(orderId) && !all)
+                return OrderErr(id, "NOORDER", "refusing: pass orderId, or all=true to cancel every working "
+                    + "order on this account. Cancelling everything is never an inference from silence.");
+
+            var targets = new List<Order>();
+            try
+            {
+                lock (acct.Orders)
+                {
+                    foreach (Order o in acct.Orders)
+                    {
+                        if (!IsWorkingState(SafeStr(delegate { return o.OrderState.ToString(); }))) continue;
+                        if (!all && SafeStr(delegate { return o.OrderId; }) != orderId) continue;
+                        targets.Add(o);
+                    }
+                }
+            }
+            catch (Exception ex) { LogSafe("order cancel scan: " + Unwrap(ex)); }
+
+            if (targets.Count == 0)
+                return OrderErr(id, "NOMATCH", all ? "no working orders on that account."
+                                                   : "no working order with orderId " + orderId);
+
+            // Lesson #159: act AFTER releasing the collection lock.
+            try { acct.Cancel(targets); }
+            catch (Exception ex) { return OrderErr(id, "CANCEL", "Cancel threw: " + Unwrap(ex)); }
+            LogSafe("ORDER CANCEL account=" + SafeStr(delegate { return acct.Name; }) + " count=" + targets.Count);
+
+            var b = new StringBuilder();
+            b.Append("{\"id\":").Append(JsonStr(id)).Append(",\"status\":\"ok\",\"ts\":")
+             .Append(JsonStr(DateTime.UtcNow.ToString("o")))
+             .Append(",\"action\":\"cancel\",\"account\":").Append(JsonStr(SafeStr(delegate { return acct.Name; })))
+             .Append(",\"orders\":[");
+            double settle = SettleSecs(text);
+            for (int i = 0; i < targets.Count; i++) { if (i > 0) b.Append(","); b.Append(OrderOutcome(targets[i], settle)); }
+            b.Append("]}");
+            return b.ToString();
+        }
+
+        private string RunOrderChange(string id, string text)
+        {
+            Account acct;
+            string refusal = OrderGate(id, text, out acct);
+            if (refusal != null) return refusal;
+
+            string orderId = ExtractJsonString(text, "orderId");
+            if (string.IsNullOrEmpty(orderId))
+                return OrderErr(id, "NOORDER", "refusing: change requires orderId.");
+
+            Order target = null;
+            try
+            {
+                lock (acct.Orders)
+                {
+                    foreach (Order o in acct.Orders)
+                    {
+                        if (SafeStr(delegate { return o.OrderId; }) != orderId) continue;
+                        target = o; break;
+                    }
+                }
+            }
+            catch (Exception ex) { LogSafe("order change scan: " + Unwrap(ex)); }
+            if (target == null) return OrderErr(id, "NOMATCH", "no order with orderId " + orderId);
+            if (!IsWorkingState(SafeStr(delegate { return target.OrderState.ToString(); })))
+                return OrderErr(id, "NOTWORKING", "order " + orderId + " is not in a working state ("
+                    + SafeStr(delegate { return target.OrderState.ToString(); }) + ") — nothing to change.");
+
+            // Absent fields mean "leave alone", which is why they are read as -1/0 sentinels rather
+            // than defaulted. A change that silently reset an untouched price to 0 would be a market
+            // order wearing a limit order's name.
+            string qRaw = ExtractJsonString(text, "quantity");
+            string lRaw = ExtractJsonString(text, "limitPrice");
+            string sRaw = ExtractJsonString(text, "stopPrice");
+            if (string.IsNullOrEmpty(qRaw) && string.IsNullOrEmpty(lRaw) && string.IsNullOrEmpty(sRaw))
+                return OrderErr(id, "NOCHANGE", "refusing: pass at least one of quantity, limitPrice, stopPrice.");
+
+            int qty = SafeInt(delegate { return target.Quantity; });
+            double limit = SafeNumRaw(delegate { return target.LimitPrice; });
+            double stop = SafeNumRaw(delegate { return target.StopPrice; });
+
+            if (!string.IsNullOrEmpty(qRaw)
+                && (!int.TryParse(qRaw, System.Globalization.NumberStyles.Integer, InvCi, out qty) || qty <= 0))
+                return OrderErr(id, "BADQTY", "quantity must be a positive integer.");
+            if (!string.IsNullOrEmpty(lRaw)) limit = ParsePrice(lRaw);
+            if (!string.IsNullOrEmpty(sRaw)) stop = ParsePrice(sRaw);
+
+            try
+            {
+                target.QuantityChanged = qty;
+                target.LimitPriceChanged = limit;
+                target.StopPriceChanged = stop;
+                acct.Change(new[] { target });
+            }
+            catch (Exception ex) { return OrderErr(id, "CHANGE", "Change threw: " + Unwrap(ex)); }
+            LogSafe("ORDER CHANGE account=" + SafeStr(delegate { return acct.Name; }) + " id=" + orderId
+                    + " qty=" + qty + " lmt=" + limit + " stp=" + stop);
+
+            return "{\"id\":" + JsonStr(id) + ",\"status\":\"ok\",\"ts\":" + JsonStr(DateTime.UtcNow.ToString("o"))
+                 + ",\"action\":\"change\",\"account\":" + JsonStr(SafeStr(delegate { return acct.Name; }))
+                 + ",\"orders\":[" + OrderOutcome(target, SettleSecs(text)) + "]}";
+        }
+
+        // Read-only: one order by id, with its CURRENT state. No confirm, no sim gate — it changes
+        // nothing. This is what a caller polls after a place/cancel rather than re-submitting.
+        private string RunOrderStatus(string id, string text)
+        {
+            string orderId = ExtractJsonString(text, "orderId");
+            if (string.IsNullOrEmpty(orderId))
+                return OrderErr(id, "NOORDER", "status requires orderId.");
+
+            Order target = null;
+            string owner = "";
+            try
+            {
+                lock (Account.All)
+                {
+                    foreach (Account a in Account.All)
+                    {
+                        lock (a.Orders)
+                            foreach (Order o in a.Orders)
+                                if (SafeStr(delegate { return o.OrderId; }) == orderId)
+                                { target = o; owner = SafeStr(delegate { return a.Name; }); break; }
+                        if (target != null) break;
+                    }
+                }
+            }
+            catch (Exception ex) { LogSafe("order status: " + Unwrap(ex)); }
+            if (target == null) return OrderErr(id, "NOMATCH", "no order with orderId " + orderId);
+
+            return "{\"id\":" + JsonStr(id) + ",\"status\":\"ok\",\"ts\":" + JsonStr(DateTime.UtcNow.ToString("o"))
+                 + ",\"action\":\"status\",\"account\":" + JsonStr(owner)
+                 + ",\"orders\":[" + OrderOutcome(target, 0) + "]}";
+        }
+
+        private static bool TryParseEnum<T>(string raw, out T value)
+        {
+            value = default(T);
+            if (string.IsNullOrEmpty(raw)) return false;
+            try
+            {
+                foreach (string n in Enum.GetNames(typeof(T)))
+                    if (string.Equals(n, raw, StringComparison.OrdinalIgnoreCase))
+                    { value = (T)Enum.Parse(typeof(T), n); return true; }
+            }
+            catch { }
+            return false;
+        }
+
+        private static double ParsePrice(string raw)
+        {
+            double d;
+            if (!string.IsNullOrEmpty(raw)
+                && double.TryParse(raw, System.Globalization.NumberStyles.Float, InvCi, out d)) return d;
+            return 0;
+        }
+
+        private static double SafeNumRaw(Func<double> f)
+        {
+            try { return f(); } catch { return 0; }
+        }
+
         private string RunAccountState(string id, string accountFilter)
         {
             try
