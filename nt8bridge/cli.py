@@ -1431,11 +1431,57 @@ def main(argv: list[str]) -> int:
     p_hg.add_argument("--check-dir", dest="check_dir", default="", help="inventory to check for already-present .nrd (default: <NT8>/db/replay). Downloads ALWAYS land in <NT8>/db/replay")
     p_hg.add_argument("--timeout", type=float, default=600.0, help="AddOn wait per date, seconds (heavy MNQ days run 300-460s)")
 
+    # ── ORCHESTRATION VERBS (2026-08-11) ─────────────────────────────────────────────────
+    # Python-only on purpose: no AddOn change means no compile, no reload, no restart, and
+    # nothing to break on a box that is mid-bake. Orchestration is where the operator was
+    # actually being spent, so orchestration is what gets automated.
+    p_fl = sub.add_parser("fleet", help="run ONE bridge verb on every sentry and tabulate")
+    p_fl.add_argument("--verb", required=True, help="the verb to run, quoted, e.g. \"ntstatus\"")
+    p_fl.add_argument("--hosts", default="", help="comma-separated subset (default: all non-retired)")
+    p_fl.add_argument("--fleet", dest="fleet_path", default="", help="path to fleet.conf")
+    p_fl.add_argument("--timeout", type=float, default=120.0)
+
+    p_cp = sub.add_parser("corpus", help="how much corpus each box holds, and HOW FRESH")
+    p_cp.add_argument("--hosts", default="")
+    p_cp.add_argument("--fleet", dest="fleet_path", default="")
+
+    p_vr = sub.add_parser("versions", help="bridge DRIFT: is each box running the AddOn we think it is?")
+    p_vr.add_argument("--hosts", default="")
+    p_vr.add_argument("--fleet", dest="fleet_path", default="")
+    p_vr.add_argument("--source", default="", help="source NT8BridgeServer.cs to compare against")
+
+    p_rr = sub.add_parser("runrange", help="drive a replay across a range UNATTENDED, stepping over gaps")
+    p_rr.add_argument("--host", default="", help="sentry name (omit = this machine)")
+    p_rr.add_argument("--from", dest="from_", required=True, help="start, e.g. 2025-12-26T00:05:00")
+    p_rr.add_argument("--to", required=True, help="end, e.g. 2026-01-02T22:00:00")
+    p_rr.add_argument("--speed", type=int, default=50, help="replay multiplier (⚠ high speed may drop ticks — Replay Test C is OPEN)")
+    p_rr.add_argument("--stall-sec", dest="stall_sec", type=float, default=90.0, help="clock still this long = a GAP, not an error")
+    p_rr.add_argument("--step-minutes", dest="step_minutes", type=int, default=90, help="how far to jump when stepping over a gap")
+    p_rr.add_argument("--max-hours", dest="max_hours", type=float, default=12.0)
+
     if not argv:
         print(CAPABILITY)
         return 0
 
     args = parser.parse_args(argv)
+    if args.command in ("fleet", "corpus", "versions", "runrange"):
+        from nt8bridge import fleet as _fleet
+        hosts = [h for h in getattr(args, "hosts", "").split(",") if h] or None
+        fp = getattr(args, "fleet_path", "") or None
+        if args.command == "fleet":
+            out = _fleet.fleet_exec(args.verb, hosts, fp, args.timeout)
+        elif args.command == "corpus":
+            out = _fleet.corpus_status(hosts, fp)
+        elif args.command == "versions":
+            src = args.source or os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "addon", "NT8BridgeServer.cs")
+            out = _fleet.versions(src, hosts, fp)
+        else:
+            out = _fleet.run_range(args.host or None, args.from_, args.to, args.speed,
+                                   args.stall_sec, 20.0, args.max_hours, args.step_minutes)
+        print(json.dumps(out, indent=2, default=str))
+        return 0
+
     if args.command == "doctor":
         return _doctor()
     if args.command == "precheck":
