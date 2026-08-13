@@ -1544,6 +1544,15 @@ def main(argv: list[str]) -> int:
     p_vr.add_argument("--fleet", dest="fleet_path", default="")
     p_vr.add_argument("--source", default="", help="source NT8BridgeServer.cs to compare against")
 
+    p_stg = sub.add_parser("stage", help="choose WHICH .nrd days a replay covers (the seek cannot)")
+    p_stg.add_argument("--host", default="", help="sentry name (omit = this machine)")
+    p_stg.add_argument("--instrument", required=True,
+                       help="e.g. 'GC 02-26' — the instrument folder under db/replay")
+    p_stg.add_argument("--day", dest="days", action="append", default=[], metavar="YYYYMMDD",
+                       help="a day to leave staged (repeatable). Everything else is PARKED, not deleted")
+    p_stg.add_argument("--restore", action="store_true", help="put every parked day back")
+    p_stg.add_argument("--list", dest="list_only", action="store_true",
+                       help="read-only: what is staged and what is parked")
     p_rr = sub.add_parser("runrange", help="drive a replay across a range UNATTENDED, stepping over gaps")
     p_rr.add_argument("--host", default="", help="sentry name (omit = this machine)")
     p_rr.add_argument("--from", dest="from_", required=True, help="start, e.g. 2025-12-26T00:05:00")
@@ -1563,6 +1572,20 @@ def main(argv: list[str]) -> int:
         return 0
 
     args = parser.parse_args(argv)
+    if args.command == "stage":
+        from nt8bridge import staging as _stg
+        host = args.host or None
+        if args.restore:
+            out = _stg.restore(args.instrument, host)
+        elif args.list_only or not args.days:
+            out = _stg.survey(args.instrument, host)
+        else:
+            out = _stg.stage(args.instrument, args.days, host)
+        print(json.dumps(out, indent=2, default=str))
+        if out.get("refused"):
+            return 2
+        return 0 if out.get("succeeded", True) else 2
+
     if args.command in ("fleet", "corpus", "versions", "runrange"):
         from nt8bridge import fleet as _fleet
         hosts = [h for h in getattr(args, "hosts", "").split(",") if h] or None
