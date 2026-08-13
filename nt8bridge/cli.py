@@ -825,6 +825,14 @@ def _playbackctl(args) -> int:
     else:
         actions = []
         if args.seek:
+            # ⚠ PARK FIRST. A seek is judged by a settle poll, and a settle poll cannot judge a
+            # transport that is ALREADY MOVING: driven 2026-08-13 against a tape left at 5x, the
+            # seek burned its whole 60s timeout reporting "still 296s from target — the clock was
+            # still moving when we stopped watching". The verdict was about the previous command's
+            # speed, not about this seek. Parking makes the sequence deterministic no matter what
+            # state the box was left in, which is the only way an unattended bake can trust it.
+            if args.speed is not None:
+                actions.append("park")
             actions.append("seek")
         # `is not None`, not truthiness: 0 is a real speed (a parked transport reads 0) and
         # `elif args.speed` silently turned `--speed 0` into a plain status read.
@@ -833,10 +841,22 @@ def _playbackctl(args) -> int:
         if not actions:
             actions = ["api"]
 
+    # ⭐ The bar witness is sampled BEFORE anything moves, because the question it answers is
+    # "did NEW bars arrive somewhere new" and that needs a baseline the seek cannot have touched.
+    witness_path = bar_before = None
+    if "seek" in actions and not args.no_verify_bars:
+        from nt8bridge import seekwitness
+        witness_path = seekwitness.newest_dump()
+        # The baseline is the BYTE COUNT, not the newest timestamp: a backward seek writes EARLIER
+        # stamps, so "has the newest time changed" is blind to exactly the case being tested.
+        _, bar_before = seekwitness.last_live_bar(witness_path) if witness_path else (None, 0)
+
     results, rc = [], 0
     for action in actions:
+        # "park" is this wrapper's own step, not a transport action: speed 0, then the real one.
+        act, spd = ("speed", 0) if action == "park" else (action, args.speed)
         try:
-            payload = ntpbctl.run_playbackctl(action, args.seek, args.speed, args.set_start, args.set_end,
+            payload = ntpbctl.run_playbackctl(act, args.seek, spd, args.set_start, args.set_end,
                                               args.settle_ms, args.seek_timeout_ms, args.confirm,
                                               args.force, args.timeout)
         except TimeoutError as e:
@@ -859,14 +879,39 @@ def _playbackctl(args) -> int:
         if rc:
             break
 
-    if len(results) == 1:
+    # ⛔ THE SEEK IS JUDGED BY THE BARS, NOT BY THE CLOCK. See seekwitness for the measurement that
+    # forced this: a seek reported "landed within a minute of target", the clock walked, and the
+    # tape never moved. A transport that ends PARKED cannot be witnessed at all — that is reported
+    # as UNVERIFIED, which is its own outcome and is never counted as success.
+    verdict = None
+    if "seek" in actions and not args.no_verify_bars and rc == 0:
+        from nt8bridge import seekwitness
+        verdict = seekwitness.verify(args.seek, bar_before, witness_path,
+                                     wait_s=args.verify_wait_s,
+                                     tolerance_min=args.verify_tolerance_min,
+                                     utc_offset_h=args.verify_utc_offset)
+        # ⛔ THREE OUTCOMES, THREE EXIT CODES — "unverified is not passed" is this project's most
+        # expensive recurring lesson, and it only means anything if a SCRIPT can act on it.
+        #   0  REPOSITIONED       the bars agree with the target
+        #   2  DID NOT REPOSITION the clock moved and the tape did not
+        #   3  UNVERIFIED         no witness (parked tape, data gap, or nothing recording)
+        if verdict.get("repositioned") is False:
+            rc = 2
+        elif verdict.get("repositioned") is None:
+            rc = 3
+
+    if len(results) == 1 and verdict is None:
         print(json.dumps(results[0], indent=2))
     else:
-        print(json.dumps({"command": "playbackctl", "requested": actions,
-                          "completed": [r.get("action") for r in results],
-                          "allSucceeded": rc == 0,
-                          "summary": " · ".join(r.get("summary", "") for r in results),
-                          "steps": results}, indent=2))
+        out = {"command": "playbackctl", "requested": actions,
+               "completed": [r.get("action") for r in results],
+               "allSucceeded": rc == 0,
+               "summary": " · ".join(r.get("summary", "") for r in results),
+               "steps": results}
+        if verdict is not None:
+            out["barWitness"] = verdict
+            out["summary"] += " · TAPE: " + verdict["verdict"]
+        print(json.dumps(out, indent=2))
     return rc
 
 
@@ -1346,6 +1391,16 @@ def main(argv: list[str]) -> int:
     p_pbc.add_argument("--force", action="store_true",
                        help="allow a seek OUTSIDE the loaded replay range (it will succeed and find "
                             "no data)")
+    p_pbc.add_argument("--no-verify-bars", dest="no_verify_bars", action="store_true",
+                       help="skip the BAR WITNESS. ⛔ Default is ON: this build's seek moves the "
+                            "displayed clock without moving the tape, and only new bars can tell")
+    p_pbc.add_argument("--verify-wait-s", dest="verify_wait_s", type=float, default=25.0,
+                       help="how long to wait for a new bar before reporting UNVERIFIED")
+    p_pbc.add_argument("--verify-tolerance-min", dest="verify_tolerance_min", type=float, default=90.0,
+                       help="how far from the target the first new bar may be and still count")
+    p_pbc.add_argument("--verify-utc-offset", dest="verify_utc_offset", type=float, default=0.0,
+                       help="hours to subtract from bar stamps (UTC) to compare with the transport's "
+                            "Est clock; --api shows the box's own offset")
     p_pbc.add_argument("--timeout", type=float, help="client wait (defaults to outlast the poll window)")
     p_st = sub.add_parser("strategy", help="chart strategies: list, enable, disable, add")
     p_st.add_argument("--chart", help="substring of the chart title (narrows every action)")
