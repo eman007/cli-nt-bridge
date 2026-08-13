@@ -1497,6 +1497,11 @@ def main(argv: list[str]) -> int:
     p_rr.add_argument("--stall-sec", dest="stall_sec", type=float, default=90.0, help="clock still this long = a GAP, not an error")
     p_rr.add_argument("--step-minutes", dest="step_minutes", type=int, default=90, help="how far to jump when stepping over a gap")
     p_rr.add_argument("--max-hours", dest="max_hours", type=float, default=12.0)
+    p_rr.add_argument("--expect-recorder", dest="expect_recorders", action="append", default=[],
+                      metavar="NAME",
+                      help="declare a corpus recorder this bake MEANS to run (repeatable). Anything "
+                           "else attached REFUSES the run — a workspace restore brings recorders "
+                           "back at Realtime and they would write replayed rows into the corpus")
 
     if not argv:
         print(CAPABILITY)
@@ -1517,8 +1522,13 @@ def main(argv: list[str]) -> int:
             out = _fleet.versions(src, hosts, fp)
         else:
             out = _fleet.run_range(args.host or None, args.from_, args.to, args.speed,
-                                   args.stall_sec, 20.0, args.max_hours, args.step_minutes)
+                                   args.stall_sec, 20.0, args.max_hours, args.step_minutes,
+                                   args.expect_recorders)
         print(json.dumps(out, indent=2, default=str))
+        # ⛔ A refused bake must not exit 0. A wrapper script that only checks the exit code would
+        # otherwise treat "I did nothing because a recorder was live" as "the bake ran".
+        if isinstance(out, dict) and out.get("refused"):
+            return 2
         return 0
 
     if args.command == "doctor":

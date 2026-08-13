@@ -193,9 +193,27 @@ def versions(src_addon: str, hosts: list[str] | None = None, fleet_path: str | N
 
 
 # ── runrange ─────────────────────────────────────────────────────────────────────────────
+# ⛔ INDICATORS THAT WRITE THE CORPUS. A replay driven while one of these is attached does not
+# merely waste a run — it appends REPLAYED rows to the training corpus, where they are
+# indistinguishable from live ones after the fact. Matched as case-insensitive substrings so a
+# version bump (…_v2_0_0 -> _v2_1_0) cannot silently un-guard them.
+CORPUS_RECORDERS = ("excursionrecorder", "candidaterecorder", "bricklog", "tickrecorder")
+
+
+def attached_recorders(call) -> list[str]:
+    """Every corpus-writing indicator currently attached, across every chart. Read-only."""
+    found = []
+    for chart in (call("chart") or {}).get("charts", []) or []:
+        for ind in chart.get("indicators", []) or []:
+            nm = (ind.get("type") or ind.get("name") or "")
+            if any(p in nm.lower() for p in CORPUS_RECORDERS):
+                found.append(nm)
+    return found
+
+
 def run_range(host: str | None, start: str, end: str, speed: int = 50,
               stall_sec: float = 90.0, poll_sec: float = 20.0, max_hours: float = 12.0,
-              step_minutes: int = 90) -> dict:
+              step_minutes: int = 90, expect_recorders: list[str] | None = None) -> dict:
     """Drive a replay from `start` to `end` WITHOUT a human watching for stalls.
 
     ⛔ THE PROBLEM THIS SOLVES, MEASURED: a replay halts at the end of each day's .nrd and simply
@@ -208,6 +226,19 @@ def run_range(host: str | None, start: str, end: str, speed: int = 50,
 
     ⚠ It reports `stalls` and `steps` rather than hiding them: a range that needed 40 steps is
     telling you the data is holed, and that belongs in the result, not in a log nobody reads.
+
+    ⛔⛔ IT REFUSES TO START WHILE AN UNDECLARED CORPUS RECORDER IS ATTACHED, and that refusal is the
+    most important line in this function. MEASURED THREE TIMES on three occasions (sentry-1 twice,
+    sentry-2 once, 2026-08-11/13): NT restores its workspace after a restart or reboot, and the
+    chart comes back carrying `SentinelExcursionRecorder` at Realtime with Playback CONNECTED. One
+    `--speed` away from writing REPLAYED rows into the Council corpus, where nothing downstream can
+    tell them from live ones. It was caught by eye each time. Being written down did not stop the
+    third occurrence, so it is a refusal now.
+
+    ⇒ The recorder set is part of the BAKE SPEC, not of the machine's leftover state. Declare what
+    you intend with `--expect-recorder NAME` (repeatable); anything else attached stops the run and
+    is named, with the command to remove it. A bake that DOES run reports `recorders` either way, so
+    "no recorder was attached" is a recorded measurement rather than an assumption.
     """
     import datetime as dt
 
@@ -230,6 +261,21 @@ def run_range(host: str | None, start: str, end: str, speed: int = 50,
         return dt.datetime.fromisoformat(s.replace("Z", "").split(".")[0]) if s else None
 
     end_dt = parse(end)
+
+    # ── the refusal, before anything moves ────────────────────────────────────────────────────
+    declared = [d.lower() for d in (expect_recorders or [])]
+    live = attached_recorders(call)
+    undeclared = [r for r in live if not any(d in r.lower() for d in declared)]
+    if undeclared:
+        return {"host": host or "local", "from": start, "to": end, "speed": speed,
+                "refused": True, "started": False,
+                "recorders": live, "undeclared": undeclared, "declared": expect_recorders or [],
+                "why": "REFUSED — %d corpus recorder(s) attached that this bake did not declare. "
+                       "A replay driven now writes REPLAYED rows into the corpus, and nothing "
+                       "downstream can tell them from live ones." % len(undeclared),
+                "fix": ["python -m nt8bridge chart --remove-indicator %s" % r for r in undeclared] +
+                       ["…or re-run with --expect-recorder <name> if it is meant to be recording"]}
+
     call("playbackctl --seek %s" % start)
     call("playbackctl --speed %d" % speed)
 
@@ -268,5 +314,9 @@ def run_range(host: str | None, start: str, end: str, speed: int = 50,
             break
         last, last_move = after, time.time()
     return {"host": host or "local", "start": start, "end": end, "speed": speed,
+            "refused": False, "started": True,
+            # Recorded on every run, not only on the refusal: "nothing was recording" is a
+            # measurement the provenance of this bake's rows depends on.
+            "recorders": live, "declared": expect_recorders or [],
             "finalClock": clock(), "stalls": stalls, "steps": steps,
             "elapsedMin": round((time.time() - t0) / 60.0, 1), "log": log}
