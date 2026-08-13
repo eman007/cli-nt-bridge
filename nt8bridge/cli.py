@@ -766,11 +766,18 @@ def _chart(args) -> int:
     except ValueError as e:
         print(json.dumps({"command": "chart", "status": "error", "ok": False, "message": str(e)}, indent=2))
         return 1
+    # ⛔ NT's enum member is `CustomRange`, not `Custom` — measured 2026-08-13, and this tool's own
+    # --help said "custom". A rejected value is reported honestly (PARTIALLY APPLIED … treat as NOT
+    # applied), but the operator is then told to fix an input the help told them to write. Accept the
+    # obvious spellings and send NT the one it actually parses; the name is not the interesting part.
+    range_type = args.range_type
+    if range_type and range_type.strip().lower() in ("custom", "customrange", "custom range"):
+        range_type = "CustomRange"
     try:
         payload = ntchart.run_chart(action, args.chart, type_name, name, params,
                                     args.confirm, args.timeout,
                                     template_path=args.apply_template,
-                                    window={"rangeType": args.range_type,
+                                    window={"rangeType": range_type,
                                             "daysBack": args.days_back,
                                             "barsBack": args.bars_back,
                                             "monthsBack": args.months_back,
@@ -795,41 +802,72 @@ def _playbackctl(args) -> int:
 
     A seek that settles short of its target returns 2 WITH its trajectory. Reporting only the final
     position is what made a walking-but-short seek indistinguishable from one that never moved.
+
+    ⭐ `--seek X --speed N` RUNS BOTH, **seek first, speed last**. Measured 2026-08-13: the dispatch
+    below was an if/elif chain, so a combined call executed the SEEK, printed a successful seek
+    verdict, and DROPPED THE SPEED — `playback` then read `speed 0` and nothing replayed. The call
+    looked like it worked, which is worse than an error, and it cost a session's worth of "why is
+    nothing moving".
+
+    ⚠ THE ORDER IS NOT ARBITRARY, AND THE FIRST VERSION OF THIS FIX GOT IT BACKWARDS. Speed-first
+    was tried and driven: `--seek … --speed 7` set the speed, then the seek's settle poll spent its
+    full 60 s timeout chasing a clock the speed write had already set walking — *"still 420s from
+    target — the clock was still moving when we stopped watching"*. A seek can only be JUDGED
+    against a parked transport. Seek to the target while it is still, then start the replay: that is
+    also what the operator means by "go here and run at N".
     """
     if args.set_start or args.set_end:
         if not (args.set_start and args.set_end):
             print(json.dumps({"command": "playbackctl", "status": "error", "ok": False,
                               "message": "--set-start and --set-end must be given together"}, indent=2))
             return 1
-        action = "range"
-    elif args.seek:
-        action = "seek"
-    elif args.speed is not None:
+        actions = ["range"]
+    else:
+        actions = []
+        if args.seek:
+            actions.append("seek")
         # `is not None`, not truthiness: 0 is a real speed (a parked transport reads 0) and
         # `elif args.speed` silently turned `--speed 0` into a plain status read.
-        action = "speed"
+        if args.speed is not None:
+            actions.append("speed")
+        if not actions:
+            actions = ["api"]
+
+    results, rc = [], 0
+    for action in actions:
+        try:
+            payload = ntpbctl.run_playbackctl(action, args.seek, args.speed, args.set_start, args.set_end,
+                                              args.settle_ms, args.seek_timeout_ms, args.confirm,
+                                              args.force, args.timeout)
+        except TimeoutError as e:
+            print(json.dumps({"command": "playbackctl", "status": "timeout", "ok": False,
+                              "requested": actions, "completed": [r.get("action") for r in results],
+                              "message": str(e)}, indent=2))
+            return 1
+
+        state = ntpbctl.parse_response(payload)
+        out = {"command": "playbackctl"}
+        out.update(payload)
+        out["summary"] = state.describe()
+        results.append(out)
+        if not state.ok:
+            rc = 1
+        elif action != "api" and not state.succeeded:
+            rc = rc or 2
+        # ⛔ Do not start the replay after a seek that did not land: running from a position we never
+        # confirmed is the silent half-success this fix exists to remove.
+        if rc:
+            break
+
+    if len(results) == 1:
+        print(json.dumps(results[0], indent=2))
     else:
-        action = "api"
-
-    try:
-        payload = ntpbctl.run_playbackctl(action, args.seek, args.speed, args.set_start, args.set_end,
-                                          args.settle_ms, args.seek_timeout_ms, args.confirm,
-                                          args.force, args.timeout)
-    except TimeoutError as e:
-        print(json.dumps({"command": "playbackctl", "status": "timeout", "ok": False,
-                          "message": str(e)}, indent=2))
-        return 1
-
-    state = ntpbctl.parse_response(payload)
-    out = {"command": "playbackctl"}
-    out.update(payload)
-    out["summary"] = state.describe()
-    print(json.dumps(out, indent=2))
-    if not state.ok:
-        return 1
-    if action == "api":
-        return 0
-    return 0 if state.succeeded else 2
+        print(json.dumps({"command": "playbackctl", "requested": actions,
+                          "completed": [r.get("action") for r in results],
+                          "allSucceeded": rc == 0,
+                          "summary": " · ".join(r.get("summary", "") for r in results),
+                          "steps": results}, indent=2))
+    return rc
 
 
 def _strategy(args) -> int:
@@ -1277,7 +1315,8 @@ def main(argv: list[str]) -> int:
                       help="load a chart template's <Indicators> via NT's OWN loader (path is on the "
                            "NT machine). Unlike --add-indicator this produces RUNNING indicators.")
     p_ch.add_argument("--range-type", dest="range_type", metavar="KIND",
-                      help="data window: Days / Bars / Months / custom (BarsProperties.RangeType)")
+                      help="data window: Days / Bars / Months / CustomRange (BarsProperties."
+                           "RangeType). ⚠ From/To are IGNORED unless RangeType is CustomRange")
     p_ch.add_argument("--days-back", dest="days_back", type=int, help="data window: days to load")
     p_ch.add_argument("--bars-back", dest="bars_back", type=int, help="data window: bars to load")
     p_ch.add_argument("--months-back", dest="months_back", type=int, help="data window: months to load")
