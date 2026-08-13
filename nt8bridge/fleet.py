@@ -192,6 +192,127 @@ def versions(src_addon: str, hosts: list[str] | None = None, fleet_path: str | N
     return {"source": want, "results": out}
 
 
+# ── builds ───────────────────────────────────────────────────────────────────────────────
+SENTINEL_DLL = ("C:/Users/Administrator/Documents/NinjaTrader 8/bin/Custom/NinjaTrader.Custom.dll")
+
+
+def builds(hosts: list[str] | None = None, fleet_path: str | None = None,
+           timeout: float = 90.0, reference: str | None = None) -> dict:
+    """SENTINEL BUILD drift: is each box running the SUITE we think it is?
+
+    ⛔ WHY THIS IS SEPARATE FROM `versions`, WHICH ONLY WATCHES THE BRIDGE. Measured 2026-08-13:
+    sentry-2 was producing bar transcripts stamped `dumpVer 1.0.0 / schema bars.1 /
+    resetOnNewTradingDay: null` while the tree here has been **v1.1.0 / bars.2 since 08-09**. The
+    v1.1.0 build had simply never reached that box, and NOTHING in the toolchain could say so —
+    the same shape as the undeployed `applyTemplate` that cost an hour, one layer down.
+
+    ⭐ AND IT IS NOT COSMETIC: `bars.2` exists precisely so "Break at EOD" is a COMPARED FIELD
+    rather than an assumed precondition. A box on `bars.1` cannot serve the bar-type parity gate,
+    and its rows do not say so — they simply omit the field. ⇒ A bake's provenance depends on
+    knowing which build stamped it, so that has to be measurable without logging into the box.
+
+    ⚠⚠ IT COMPARES SOURCE, NOT THE DLL — AND THE FIRST VERSION GOT THAT WRONG. Hashing
+    `NinjaTrader.Custom.dll` reported **all six sentries DRIFTED with six different hashes**, which
+    is exactly what it would report if every box were perfectly in sync: each box COMPILES ITS OWN
+    DLL, and a .NET build is not reproducible byte-for-byte (fresh MVID and timestamps per
+    compile). A check that can only ever say DRIFTED is not a check — it is the "verified and still
+    lying" failure this project has written down six times, caught here only because six mutually
+    different hashes made no sense.
+    ⇒ We compare an ordered digest of the `.cs` SOURCE plus the version constants that actually get
+    STAMPED INTO THE DATA. Same source ⇒ same digest, on every box, forever.
+    """
+    import hashlib
+    ref_root = reference or os.path.dirname(SENTINEL_DLL)
+
+    def local_digest(root: str) -> dict | None:
+        """Ordered digest of every .cs under the tree: name + size, hashed in sorted order."""
+        if not os.path.isdir(root):
+            return None
+        h, n = hashlib.sha256(), 0
+        for base, _dirs, files in os.walk(root):
+            if "_archive" in base:            # same single filter the remote probe uses
+                continue
+            for f in sorted(files):
+                if f.lower().endswith(".cs"):
+                    p = os.path.join(base, f)
+                    h.update(f.encode("utf-8", "replace"))
+                    h.update(str(os.path.getsize(p)).encode())
+                    n += 1
+        return {"files": n, "sha256": h.hexdigest()[:16]}
+
+    want = local_digest(ref_root)
+
+    boxes = [h for h in read_fleet(fleet_path) if not h.get("retired")]
+    if hosts:
+        boxes = [h for h in boxes if h["name"] in hosts]
+
+    # Same digest recipe as local_digest, expressed for PS 5.1: name + size, sorted, one hash.
+    # ⚠ No `if` as an expression and no ternary in 5.1 -- both cost this project a debug cycle.
+    ps = ("$r='C:/Users/Administrator/Documents/NinjaTrader 8/bin/Custom'; "
+          "$f=Get-ChildItem $r -Recurse -Filter *.cs -File -EA SilentlyContinue | "
+          # ⚠ ONE simple pattern, no backslashes. The first cut used '_archive|\\obj\\' and the
+          # escaping across python → bash → ssh → cmd → PowerShell mangled it into a filter that
+          # matched EVERYTHING, so the probe hashed an empty set and reported the sha256 of the
+          # empty string as a confident DRIFTED on all six boxes. An inert check that still prints
+          # a verdict is worse than no check; the tell was `files 0`, which is why it is REPORTED.
+          "Where-Object { $_.FullName -notmatch '_archive' } | Sort-Object Name; "
+          "$sb=New-Object System.Text.StringBuilder; "
+          "foreach($x in $f){ [void]$sb.Append($x.Name); [void]$sb.Append($x.Length) }; "
+          "$md=New-Object System.Security.Cryptography.SHA256Managed; "
+          "$b=[Text.Encoding]::UTF8.GetBytes($sb.ToString()); "
+          "$h=($md.ComputeHash($b)|ForEach-Object{$_.ToString('x2')}) -join ''; "
+          "$d='C:/Users/Administrator/Documents/NinjaTrader 8/bin/Custom/NinjaTrader.Custom.dll'; "
+          "$bt='none'; if(Test-Path $d){ $bt=(Get-Item $d).LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') }; "
+          "\"{0} {1} {2}\" -f ($f|Measure-Object).Count,$h.Substring(0,16),$bt")
+
+    def one(h):
+        rc, txt = ssh(h["ssh"], 'powershell -NoProfile -Command "%s"' % ps.replace('"', '\\"'), timeout)
+        m = re.search(r"(\d+)\s+([0-9A-Fa-f]{16})\s+(\S+)", txt or "")
+        if not m:
+            # ⛔ UNREACHABLE IS ITS OWN OUTCOME. A box we could not ask is never "fine".
+            return h["name"], {"reachable": False, "drift": "UNKNOWN", "raw": (txt or "")[:120]}
+        got = {"files": int(m.group(1)), "sha256": m.group(2).lower(), "dllBuiltUtc": m.group(3),
+               "reachable": True}
+        if want:
+            got["drift"] = "CURRENT" if got["sha256"] == want["sha256"].lower() else "DRIFTED"
+        return h["name"], got
+
+    out: dict[str, dict] = {}
+    with _fut.ThreadPoolExecutor(max_workers=6) as ex:
+        for name, res in ex.map(one, boxes):
+            out[name] = res
+
+    # ⭐ THE FLEET IS ITS OWN REFERENCE, AND THAT CORRECTION MATTERS. Measured 2026-08-13: the
+    # sentries carry a 398-file DEPLOYED SUBSET while this tree has 988. Judging them against main
+    # would print DRIFTED on every box forever — a check that can only say one thing. The question
+    # worth asking is CONSENSUS: are the boxes running the same suite as each other, and who is the
+    # odd one out? Main's digest is still reported, as context, never as the verdict.
+    reachable = {n: v for n, v in out.items() if v.get("reachable")}
+    tally: dict[str, list[str]] = {}
+    for n, v in reachable.items():
+        tally.setdefault(v["sha256"], []).append(n)
+    mode = max(tally, key=lambda k: len(tally[k])) if tally else None
+    for n, v in out.items():
+        if not v.get("reachable"):
+            v["drift"] = "UNKNOWN"
+        else:
+            v["drift"] = "CONSENSUS" if v["sha256"] == mode else "OUTLIER"
+
+    outliers = sorted(n for n, v in reachable.items() if v["sha256"] != mode)
+    unknown = sorted(n for n, v in out.items() if not v.get("reachable"))
+    return {"referenceTree": ref_root, "referenceDigest": want,
+            "note": "the reference tree is CONTEXT ONLY — sentries run a deployed subset, so a "
+                    "difference from main is expected and is not drift",
+            "hosts": len(boxes), "results": out,
+            "consensusDigest": mode, "groups": {k: sorted(v) for k, v in tally.items()},
+            "outliers": outliers, "unknown": unknown,
+            "verdict": ("all %d reachable boxes AGREE (%s)" % (len(reachable), mode)) if not outliers
+                       and not unknown else
+                       "%d OUTLIER(s): %s%s" % (len(outliers), ", ".join(outliers) or "-",
+                                                "; %d UNKNOWN: %s" % (len(unknown), ", ".join(unknown))
+                                                if unknown else "")}
+
+
 # ── runrange ─────────────────────────────────────────────────────────────────────────────
 # ⛔ INDICATORS THAT WRITE THE CORPUS. A replay driven while one of these is attached does not
 # merely waste a run — it appends REPLAYED rows to the training corpus, where they are

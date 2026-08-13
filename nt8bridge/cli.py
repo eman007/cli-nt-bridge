@@ -1544,6 +1544,10 @@ def main(argv: list[str]) -> int:
     p_vr.add_argument("--fleet", dest="fleet_path", default="")
     p_vr.add_argument("--source", default="", help="source NT8BridgeServer.cs to compare against")
 
+    p_bld = sub.add_parser("builds", help="SENTINEL build drift: is each box running the suite we think it is?")
+    p_bld.add_argument("--hosts", default="", help="comma-separated subset (default: all non-retired)")
+    p_bld.add_argument("--fleet", dest="fleet_path", default="", help="path to fleet.conf")
+    p_bld.add_argument("--reference", default="", help="DLL to compare against (default: this machine's)")
     p_stg = sub.add_parser("stage", help="choose WHICH .nrd days a replay covers (the seek cannot)")
     p_stg.add_argument("--host", default="", help="sentry name (omit = this machine)")
     p_stg.add_argument("--instrument", required=True,
@@ -1572,6 +1576,18 @@ def main(argv: list[str]) -> int:
         return 0
 
     args = parser.parse_args(argv)
+    if args.command == "builds":
+        from nt8bridge import fleet as _fleet
+        hosts = [h for h in (args.hosts or "").split(",") if h] or None
+        out = _fleet.builds(hosts, args.fleet_path or None, reference=args.reference or None)
+        print(json.dumps(out, indent=2, default=str))
+        # An OUTLIER is exit 2; a box we could not ask is exit 3, never folded into success.
+        if out.get("outliers"):
+            return 2
+        if out.get("unknown"):
+            return 3
+        return 0
+
     if args.command == "stage":
         from nt8bridge import staging as _stg
         host = args.host or None
