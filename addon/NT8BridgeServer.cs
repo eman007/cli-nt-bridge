@@ -5586,6 +5586,23 @@ namespace NinjaTrader.NinjaScript.AddOns
                     }
                     if (core != null) break;
                 }
+                // ⛔ COUNT THE GENERATIONS. MEASURED 2026-08-17: the risk service wrote
+                // "GOV TRACE ... -> DayHalted" and 82 s later this consult read "Trading", with NO
+                // intervening change logged by the writer. A value cannot be both unless the writer
+                // and the reader are looking at DIFFERENT static stores -- i.e. two generations of
+                // NinjaTrader.Custom are loaded (six `reload`s that night) and GetAssemblies() order
+                // decided which one this resolved. SentinelCore v1.40.0's generation beacon exists
+                // for exactly this hazard; a seam read that does not name its generation is a guess.
+                int genCount = 0;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    foreach (var n in candidates)
+                        if (asm.GetType(n, false) != null) { genCount++; break; }
+                if (genCount > 1)
+                    LogSafe("RISK CONSULT AMBIGUOUS: " + genCount + " loaded assemblies expose "
+                          + "SentinelCore. This read may target an ORPHANED seam store, so a "
+                          + "'permitted' answer here is NOT authoritative. Restart NT to collapse "
+                          + "the generations before trusting it.");
+
                 if (core == null)
                 {
                     if (!_sentinelAbsentLogged)
