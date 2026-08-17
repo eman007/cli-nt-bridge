@@ -4,6 +4,200 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-08-04 — SIX COMMANDS: THE MUTATING HALF
+
+1.5.0 made NinjaTrader's hidden state readable. This makes it *operable*, and closes the two gaps
+that let a "one provable tree" claim be true of only half the system.
+
+Every mutating command here follows the same three rules, each bought with real time:
+**it refuses an ambiguous match rather than resolving it**, **it requires explicit confirmation
+before arming an order source**, and **it verifies the OUTCOME instead of trusting that the call
+resolved.** A reflection call that returns cleanly while changing nothing is the single failure this
+project keeps re-paying for.
+
+### Added
+
+- **`selfcheck` — the CLI audits itself.** The fleet was proven to run one identical `bin\Custom`
+  tree and the conclusion drawn was "the fleet runs one tree". It did not: the PYTHON half — this
+  package, *the thing every automation actually invokes* — was three different versions across six
+  boxes, and nothing had ever checked it. Reports which nt8bridge is imported and from where, a
+  content hash over its modules, whether the installed metadata matches the source tree, and whether
+  declared dependencies are actually satisfied. `--requirements` verifies any extra manifest;
+  `--python` audits another interpreter, because "is the manifest satisfied?" has no answer until you
+  say which venv. `--expect-hash` / `--expect-version` turn it into a fleet assertion.
+
+  ⭐ On its very first run it found three disagreeing version numbers on the reference box
+  (pyproject 1.6.0 / installed 1.2.0 / `__init__` 0.1.0) — an editable install keeps the CODE current
+  while the reported version stays whatever it was at install time. **+20 tests.**
+
+- **`log` — grep a log file from inside NinjaTrader.** The verification loop ended at "read the live
+  truth" and that last step was an ad-hoc remote shell per box. The remote transport encodes
+  UTF-16LE then base64, so the usable payload is ~12 KB against files of tens of megabytes:
+  filtering at the client is not slow, it is impossible. Matching happens NT-side and only matches
+  travel. Opens with `FileShare.ReadWrite | Delete`, because NT holds its own logs open — the live
+  file is exactly the one a naive reader cannot touch. A missing path is an ERROR, never `ok` with
+  zero matches; a pattern that will not compile fails loudly rather than degrading to match-all or
+  match-none, one of which reads all-clear. `--fail-on-match` makes it a pre-flight fault gate.
+  **+10 tests.**
+
+- **`dialog --all` and `dialog --close`.** The modal-only scan reported *"no dialogs"* on all six
+  boxes while a sentry sat with an `Error` box **and** an `Auto Rollover Notification` open — a clean
+  bill of health over a machine with two unanswered prompts on screen. Neither disables its owner, so
+  neither counted as modal. `--all` widens to every visible top-level window; `modals` stays the
+  incident list. `--close` posts `WM_CLOSE` (what the title-bar X sends) for a window whose buttons
+  cannot be resolved — the WPF walk found none on that Error box though its OK was plainly visible
+  in a screenshot. The outcome is still verified: the window has to actually go away.
+
+  ⚠ The case that justifies never clicking an unnamed button: a .NET assertion box offers
+  `Abort=Quit, Retry=Debug, Ignore=Continue`, and its **default is Abort**. On an unattended trading
+  box the default answer kills the platform.
+
+- **`dialog` — see and answer the modal blocking a headless box.** A modal stops everything and
+  announces nothing; the only way to see one was an interactive session, which is itself barred
+  during a bake. Modality is detected without touching WPF (Windows disables the owner), buttons are
+  found via child HWNDs for native dialogs and a per-dispatcher visual-tree walk for WPF ones. It
+  will not guess: `dismiss` requires an explicit dialog AND button and refuses either ambiguity —
+  the default answer on a rollover prompt is the one that spends your holdout. The click is posted,
+  then the window is re-probed, and `dismissed` reports whether it actually went away. **+13 tests.**
+
+- **`strategy` — list / enable / disable / add, on a CHART.** A workspace does not contain its
+  strategy: it stores an integer handle, and the type and parameters live in a database that also
+  holds Accounts, Orders and Positions and so must never be copied between boxes. Staging a cell on a
+  second machine ended in a human re-adding it by hand — and anything needing a GUI click per box
+  cannot run a matrix. `enable` and `add` require `--confirm`; `disable` does not, because the safe
+  direction must never be the harder one to reach. **+17 tests.**
+
+  ⭐ Driving it against a live chart forced a distinction the first draft got wrong: `changed` and
+  `succeeded` are different questions. Disabling an already-stopped strategy moves nothing yet
+  succeeds; a SetState that resolved and left the state untouched moves nothing and FAILED.
+
+- **`playbackctl` — seek, speed, and the replay range.** A day was lost to a seek that "did not
+  work": every failing attempt reported back in 57 ms and every succeeding one took 5-7 seconds,
+  because the seek is asynchronous and walks the clock toward the target — so judging it immediately
+  froze it mid-flight. This polls until the clock SETTLES before rendering any verdict and returns
+  the whole trajectory, because reporting only the final position makes "walked and stopped short"
+  indistinguishable from "never moved", and those need opposite fixes. **+14 tests.**
+
+  ⭐ `--api` (read-only member discovery) refuted the assumption the seek was written against: this
+  build exposes **no `Reset(DateTime)` at all**. The real seek is a writable static `NowEst`, and the
+  range is `FromEst`/`ToEst` — not the obfuscated ConnectOptions members. Both paths are kept and the
+  response says which was used, so the day a build changes this it says so instead of silently doing
+  nothing.
+
+- **`chart` — list charts, attach and remove indicators, close.** The other half of reproducing a
+  cell: a chart-derived sensor computes from its own chart's bars, so the indicator set is part of
+  the cell rather than decoration. Add and remove are judged by the chart's indicator count before
+  and after. **Creating chart windows is deliberately excluded** — it means building a WPF window on
+  another UI thread of a platform hosting live order routing, and the value is not there: `layout`
+  already places windows across machines and a workspace already carries the charts. **+13 tests.**
+
+### Found by driving it against six live boxes
+
+Everything below was invisible to the test suite and to reading the code. It is recorded because the
+pattern repeats: *these tools are only worth having if using them can prove them wrong.*
+
+- **A seek can succeed and land where there is no data.** Writing the clock validates nothing. On a
+  transport with 04-19..04-24 loaded, a seek to 2026-05-01 answered `succeeded: true, offset 0` — and
+  it was telling the truth. The clock really did go there. A bake from that position produces nothing
+  while every check reads green. An out-of-range target now **fails closed**, `--force` is the only
+  way past, and every seek result carries the loaded range.
+
+- **Attaching an indicator is not running one.** `Indicators.Add` + `SetState(Active)` leaves it at
+  `Configure` with `enabled=false` while its neighbours on the same chart read `Realtime`, and no
+  `Reload`/`Refresh` member resolves on `ChartControl` to finish the job. The command reported
+  success. It now reports `attached` and `running` separately and **fails** unless both hold.
+  ⚠ This means `--add-indicator` currently ATTACHES BUT DOES NOT ACTIVATE. It says so.
+
+- **`strategy` enable/disable: four rounds of "fixed", and the last one was the real bug.** Worth
+  reading as a sequence, because each step looked like a complete answer:
+
+  1. `SetState(Active)` on a `Finalized` chart strategy resolves and changes nothing. Verification
+     returned exit 2 rather than a green — the design working on its own author.
+  2. `chart --api` named the real member: `ChartControl.StrategyEnable(StrategyRenderBase, ChartBars,
+     bool, Action)`. Discovery answered in one command what guessing had not.
+  3. It takes an `Action` callback, so it is ASYNCHRONOUS — reading the state immediately after
+     looked exactly like "the call did nothing". **The seek root cause, met a second time.** Fixed by
+     polling until the state settles.
+  4. A 4-second hold passed and the strategy came back 10 seconds later, so the hold became an active
+     watch that fails the instant the state leaves the target.
+  5. ⭐⭐ **And a 45-second watch still "confirmed" a disable that never happened.** `StrategyEnable`
+     does not flip a flag on the object you hand it — it **terminates that instance and the chart
+     re-applies a new one**. The verifier was holding the original reference and watching a corpse:
+     it read `Finalized` and held there forever while the chart's live strategy was a different
+     object at `Realtime`. Only an independent `strategy list`, which re-enumerates the collection,
+     disagreed. **Identity here is the (type, chart) pair, never the pointer.**
+
+  6. NT's own log finally named the mechanism, and it took two readings to hear it:
+     `Disabling NinjaScript strategy …` immediately followed by `Enabling … On starting a real-time
+     strategy … MaxRestarts=4 in 5 minutes`. **`StrategyEnable` always ends ENABLED** — it is a
+     re-apply, not a setter, and its boolean is not the lever its position suggests.
+
+  ⇒ **The durable answers, each measured rather than assumed:**
+  | want | member that actually works | verified by |
+  |---|---|---|
+  | start a strategy | `ChartControl.StrategyEnable(...)` | state reaches Realtime (async) |
+  | stop a strategy | `ChartControl.RemoveStrategyForChartBars(bars)` | `Realtime -> Absent`, held 20 s |
+  | disable in place | **nothing found** — 5 mechanisms tried, all reverted | reports `reverted: true`, exit 2 |
+
+  So `--mechanism` names every lever (`flag`, `flag-refresh`, `enable-call`, `setstate`, `remove`),
+  `auto` climbs them in ascending order of violence and keeps the first rung that **holds**, and the
+  response says which one won. When a future build moves this, the question stays answerable by
+  measurement instead of by another round of guessing. `--hold-ms` is exposed because a hold shorter
+  than a revert is just a slower way to print the same false green, and `--index` exists because
+  refusing ambiguity must not become a dead end when a chart legitimately holds two of the same type.
+
+  ⚠ Still true and now honestly reported: **disable-in-place does not work on this build**, and
+  `--add` attaches at `Configure` — instances added this way never bind to a `ChartBars`, so
+  `RemoveStrategyForChartBars` cannot clear them either. Removal is verified **by count**, because
+  the state check happily read "not live" for two inert duplicates that were still on the chart.
+
+- **`--speed 0` was rejected as if it were a missing argument** — in the validator *and*, one layer
+  down, in the request builder's falsy-zero test. 0 is what a parked transport reads, so the single
+  value needed to STOP a running replay was the one value that could not be sent. Found while putting
+  a test box back exactly as it was found.
+
+- **Setting a speed starts the transport.** Not a defect, but it is not obvious from the name, and it
+  moved a test box's clock 2h15m before it was noticed. Worth knowing before scripting it.
+
+### Fixed
+
+- **The AddOn's JSON key lookup matched VALUES as well as keys.** It took the first `"key"` anywhere
+  in the request and then hunted for the next `':'`, so `ExtractJsonString(req, "chart")` matched the
+  value in `"kind":"chart"` and returned the following field. The chart filter silently became
+  `"list"` and a box with three charts answered *"no matching charts"* — confident, well-formed and
+  completely wrong. A key is now required to be a quoted token followed by a colon. Found by driving
+  the command, not by reading the code.
+
+- `log --text` crashed with `UnicodeEncodeError` on a cp1252 console, losing an entire read over one
+  glyph. These logs are full of arrows and box-drawing. The text path now degrades the glyph; the
+  JSON path stays ASCII-escaped so it is exact on any console.
+
+- `nt8bridge.__version__` (0.1.0) and `pyproject` (1.6.0) had drifted apart. Both now say 1.7.0, and
+  `selfcheck` compares them plus the installed metadata so they cannot silently diverge again.
+
+## [1.6.0] - 2026-08-04 — LOCAL INTEGRATION BUILD
+
+Not a release. This is the union of the two in-flight PRs plus `layout`, built so the six-node
+fleet runs ONE coherent tree instead of whichever PR branch was deployed last. Upstream should take
+1.4.0 and 1.5.0 on their own; this section exists so a node reporting 1.6.0 is self-explanatory.
+
+### Added
+
+- **`layout` — capture and apply where NinjaTrader's windows sit.** Window placement was the last
+  uncontrolled input to a replay-equivalence run: the code, the `.nrd`, the historical bars and the
+  chart+strategy blob were all files we could hash, and layout lived only inside a running
+  NinjaTrader, set by hand, per box. Stored as **fractions of the monitor work area**, so one file
+  describes the same arrangement on a 2560x1440 desktop and a 1920x1080 VM, and matched on
+  **identity rather than HWND**, so it survives the restart it exists to survive.
+
+  ⚠ That last part needed a specific fix: NinjaTrader's WPF windows are classed
+  `HwndWrapper[NinjaTrader.exe;UI thread 1;<GUID>]` and the GUID is regenerated on every launch, so
+  the raw class is useless as a key. Only the app segment is stable.
+
+  The AddOn half enumerates and moves an HWND it is told to move — nothing else. Matching,
+  fractions and monitor mapping are pure functions in `layout.py`, because the AddOn is the one
+  component that cannot be tested without a running NinjaTrader. **+28 tests.**
+
 ## [1.5.0] - 2026-08-04
 
 Four **read-only** commands that answer questions which previously required an RDP session. Each one
@@ -65,7 +259,6 @@ change into a whole-tree compile break — which takes down every unrelated tool
   - `workspace` matched strategies on `name` only. Tools that blank their own `Name` at `DataLoaded`
     (the on-chart label *is* the `Name` property) were therefore invisible, and it found nothing on a
     real chart. It now matches on name **or** type.
-
 ## [1.4.0] - 2026-08-04
 
 Stacks on 1.3.0 (`reload` + `windows`). These two commands were split out of that PR for review, and

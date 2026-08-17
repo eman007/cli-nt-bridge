@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 *.pdf
 *.png
+
+# Internal planning doc — references fleet hosts; never ships upstream
+UPSTREAM_QUEUE.md

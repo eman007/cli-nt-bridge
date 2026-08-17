@@ -165,7 +165,28 @@ namespace NinjaTrader.NinjaScript.AddOns
                     else instrObj = cc.GetType().GetProperty("Instrument").GetValue(cc, null);
 
                     object bpObj;
-                    if (typeId < 0) bpObj = cc.GetType().GetProperty("BarsPeriod").GetValue(cc, null);   // keep current
+                    if (typeId < 0)
+                    {
+                        // KEEP the current bars type — but still honour Value / Value2 / BaseBarsPeriodValue.
+                        // ⭐ WHY THIS BRANCH HAD TO LEARN TO SET VALUES (measured 2026-08-09):
+                        //    switching to a CUSTOM bars type (e.g. SentinelTBars, 212201) and passing
+                        //    Value=6/Value2=24 on a freshly constructed BarsPeriod does NOT stick — NT
+                        //    applies the bars type's OWN defaults when the TYPE changes, and the chart
+                        //    came back `212201_0_2_...` (Value 0, Value2 2) both times it was asked.
+                        //    Stock types (Renko 11) are unaffected, which is why this went unnoticed.
+                        //    With no path that sets values on an ALREADY-selected custom type, the only
+                        //    way to reach 6/24 was the Data Series dialog by hand — i.e. exactly the
+                        //    per-box GUI work this command exists to remove.
+                        //    ⇒ Two-pass usage: switch the type, then call again WITHOUT --bars-type to
+                        //      stamp the values onto the type NT has already applied its defaults to.
+                        bpObj = cc.GetType().GetProperty("BarsPeriod").GetValue(cc, null);
+                        if (bpObj != null)
+                        {
+                            if (value.HasValue)     SetIntProp(bpObj, "Value", value.Value);
+                            if (value2.HasValue)    SetIntProp(bpObj, "Value2", value2.Value);
+                            if (baseValue.HasValue) SetIntProp(bpObj, "BaseBarsPeriodValue", baseValue.Value);
+                        }
+                    }
                     else
                     {
                         BarsPeriod bp = new BarsPeriod { BarsPeriodType = (BarsPeriodType)typeId };

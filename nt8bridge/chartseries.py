@@ -23,23 +23,27 @@ def run_chartseries(*, instrument=None, bars_type=None, bars_value=None, bars_va
                     timeout: float = 30.0) -> dict:
     if bars_type and bars_value is None:
         raise ValueError("--bars-type requires --bars-value")
-    if bars_value2 is not None and bars_value is None:
-        raise ValueError("--bars-value2 requires --bars-value")
-    if bars_base_value is not None and bars_value is None:
-        raise ValueError("--bars-base-value requires --bars-value")
     dataseries = {}
     if instrument:
         dataseries["instrument"] = instrument
     if bars_type:
         dataseries["barsPeriodType"] = str(bars_type)
-        # The AddOn's ExtractJsonString reads only QUOTED JSON values, so send the period
-        # value as a string (live-proven: a bare numeric was dropped to the default).
+    # ⭐ VALUES ARE SENT INDEPENDENTLY OF --bars-type (fixed 2026-08-09).
+    #    They used to be nested under `if bars_type:`, so a call that named no type sent no values —
+    #    and there was therefore NO way to set Value/Value2 on a bars type already selected. That
+    #    matters because switching to a CUSTOM type makes NT apply that type's OWN defaults and
+    #    discard the values on the incoming BarsPeriod: asking for SentinelTBars 6/24 produced
+    #    `212201_0_2_...` twice in a row. Stock types (Renko) are unaffected, which is why it hid.
+    #    ⇒ Two-pass: switch the type, then call again WITHOUT --bars-type to stamp the values on.
+    # The AddOn's ExtractJsonString reads only QUOTED JSON values, so send them as strings
+    # (live-proven: a bare numeric was silently dropped to the default).
+    if bars_value is not None:
         dataseries["barsPeriodValue"] = str(int(bars_value))
-        if bars_value2 is not None:
-            dataseries["barsPeriodValue2"] = str(int(bars_value2))
-        # third param (UniRenko Open Offset etc.) — string, only when provided.
-        if bars_base_value is not None:
-            dataseries["baseBarsPeriodValue"] = str(int(bars_base_value))
+    if bars_value2 is not None:
+        dataseries["barsPeriodValue2"] = str(int(bars_value2))
+    # third param (UniRenko Open Offset etc.) — only when provided.
+    if bars_base_value is not None:
+        dataseries["baseBarsPeriodValue"] = str(int(bars_base_value))
     if not dataseries:
         raise ValueError("nothing to change: pass --instrument and/or --bars-type/--bars-value")
 

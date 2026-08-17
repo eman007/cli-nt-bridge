@@ -69,7 +69,23 @@ Set up a Strategy Analyzer tab once (strategy, instrument, dates, commission); `
 
 ## Commands
 
-24 commands, grouped by what they do:
+39 commands, grouped by what they do:
+
+**Self-audit, state & UI** (see [Driving NinjaTrader headlessly](#driving-ninjatrader-headlessly))
+```
+selfcheck     is THIS CLI the fleet's CLI? version, module hash, dependency manifests
+ntstatus      is NT running the code on disk? (catches a stale DLL)
+playback      replay transport: clock, MOVING?, speed, per-.nrd coverage
+playbackctl   MOVE the transport: seek (settle-polled, range-checked), speed, range
+workspace     charts + indicators + strategies AND their enabled state
+chart         charts: list, attach/remove an indicator, close, --api discovery
+strategy      chart strategies: list, enable, disable/remove
+log           grep a log file INSIDE NT (server-side filter; NT holds them open)
+dialog        list/answer/close dialogs — modal AND non-modal
+screenshot    capture a window (or the whole screen) as PNG
+windows       inventory NT's top-level windows
+layout        capture/apply where NT's windows sit (fractions, not pixels)
+```
 
 **Setup & diagnostics**
 ```
@@ -111,7 +127,77 @@ chartseries   change a LIVE chart's data series (instrument + bar type/period)
 **Resilience**
 ```
 watchdog      restart NinjaTrader if it hangs (stale heartbeat) or crashes
+restart       graceful close + relaunch
+regions       find and strip DUPLICATED NinjaScript generated regions (they break the whole compile)
+reload        recompile and report whether the assembly actually reloaded
 ```
+
+## Driving NinjaTrader headlessly
+
+These commands read and change state that previously existed only inside a running GUI. Everything
+below was **measured on live boxes**, not inferred — where a thing does not work, that is recorded
+as plainly as where it does.
+
+### What works, and what does not
+
+| Operation | Works? | Member that actually does it |
+|---|---|---|
+| Read charts / indicators / strategies + state | ✅ | `ChartControl.Indicators` / `.Strategies` |
+| Seek the replay clock | ✅ | writable static `PlaybackAdapter.NowEst` |
+| Set replay speed / range | ✅ | `PlaybackSpeed`, `FromEst` / `ToEst` |
+| Grep a log NT holds open | ✅ | `FileShare.ReadWrite \| Delete` |
+| List / answer / close dialogs | ✅ | Win32 `BM_CLICK`, WPF `ButtonBase`, `WM_CLOSE` |
+| **Start** a chart strategy | ✅ | `ChartControl.StrategyEnable(...)` (asynchronous) |
+| **Stop** a chart strategy | ✅ | `RemoveStrategyForChartBars` **+ `Strategies.Remove`** |
+| **Disable in place** (leave attached, stopped) | ❌ | 5 mechanisms tried; every one reverts |
+| Attach a strategy programmatically | ❌ | instance never binds to a `ChartBars` — refused by default |
+| Activate an added indicator | ❌ | attaches at `Configure`; `RefreshIndicators` does not finish it |
+
+### The rules every mutating command follows
+
+1. **Refuse an ambiguous match** — never resolve it by taking the first. `--index` makes the choice
+   explicit when a chart legitimately holds two of the same type.
+2. **Require confirmation before arming an order source.** `--enable` and `--add` need `--confirm`;
+   `--disable` does not, because the safe direction must never be the harder one to reach.
+3. **Verify the OUTCOME, never the call.** A reflection call that returns cleanly while changing
+   nothing is the single failure this project keeps re-paying for.
+
+### Six ways a verified check still lied
+
+Each of these shipped looking correct and was caught by driving it. They are the reason the rules
+above exist, and they generalise well beyond NinjaTrader.
+
+- **A seek can succeed and land where there is no data.** Writing the clock validates nothing: a
+  seek outside the loaded range returns `succeeded: true, offset 0` and is telling the truth. Now
+  fails closed; `--force` overrides; every result carries its range.
+- **A state observed once is not a state change.** `StrategyEnable` terminates the instance and the
+  chart re-applies a new one. The target must *hold* — `--hold-ms`, watched throughout.
+- **A stale object reference watches a corpse.** Holding the original strategy pointer read
+  `Finalized` for 45 seconds while the chart's live strategy sat at `Realtime`. **Identity is the
+  (type, chart) pair, never the pointer.**
+- **`MethodInfo.Invoke` hides the real error.** `TargetInvocationException.Message` is the
+  content-free *"Exception has been thrown by the target of an invocation."* — unwrap `InnerException`.
+- **`GetMethod` binds public-only by default**, and NT's chart API is nearly all internal. Even the
+  binder overload misses inherited non-public members; enumerate `GetMethods` instead.
+- **A modal-only dialog scan gave a clean bill of health** to a machine with an `Error` box and a
+  rollover prompt on screen. Non-modal still blocks an unattended box — use `dialog --all`.
+
+### ⛔ Two things deliberately not done
+
+- **`ChartControl.ApplyStrategy` is a trap.** It is the member the chart uses itself, so it looks
+  like the principled attach path — but invoked externally it blocks the chart's UI thread past 30 s
+  and raises .NET assertion dialogs **whose default button is `Abort = Quit NinjaTrader`**. Left
+  documented in the AddOn source so nobody re-derives it.
+- **`chart` does not create chart windows.** That means building a WPF window on another UI thread
+  of a platform hosting live order routing, and the value is not there: `layout` already places
+  windows across machines and a workspace already carries the charts.
+
+### Threading, briefly
+
+NinjaTrader is **multi-UI-threaded** — every window owns its own dispatcher. Touching a WPF member
+from the bridge's poller thread throws on every window, every time, which returns an empty list that
+looks like a real answer. Win32 is thread-agnostic and is preferred wherever it can do the job;
+otherwise marshal to the owning dispatcher with a **bounded** wait and report a timeout as a fact.
 
 ### compile
 

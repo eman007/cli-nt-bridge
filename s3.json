@@ -1,0 +1,55 @@
+{
+  "command": "layout",
+  "action": "capture",
+  "written": null,
+  "monitors": 1,
+  "windows": 2,
+  "layout": {
+    "schema": "sentinel.berth.layout/1",
+    "name": "layout",
+    "tool": "nt8bridge layout",
+    "capturedUtc": "2026-08-04T05:36:52Z",
+    "monitors": [
+      {
+        "id": 0,
+        "primary": true,
+        "work": {
+          "x": 0,
+          "y": 0,
+          "w": 1280,
+          "h": 752
+        }
+      }
+    ],
+    "windows": [
+      {
+        "titleKey": "NinjaScript Editor",
+        "title": "NinjaScript Editor",
+        "class": "HwndWrapper[NinjaTrader.exe;UI thread 0;b1bb360c-1b4d-4f4e-8053-efc3f5f8a98b]",
+        "classKey": "HwndWrapper[NinjaTrader.exe]",
+        "monitor": 0,
+        "state": "normal",
+        "frac": {
+          "x": 0.2227,
+          "y": 0.0,
+          "w": 0.7031,
+          "h": 0.383
+        }
+      },
+      {
+        "titleKey": "Control Center",
+        "title": "Control Center - Accounts",
+        "class": "HwndWrapper[NinjaTrader.exe;UI thread 0;31fb59a7-5073-4928-8f99-513ad25db7f8]",
+        "classKey": "HwndWrapper[NinjaTrader.exe]",
+        "monitor": 0,
+        "state": "normal",
+        "frac": {
+          "x": 0.1977,
+          "y": 0.4574,
+          "w": 0.8008,
+          "h": 0.3005
+        }
+      }
+    ]
+  }
+}
