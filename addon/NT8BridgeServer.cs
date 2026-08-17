@@ -5516,8 +5516,131 @@ namespace NinjaTrader.NinjaScript.AddOns
                     + "(Provider=" + SafeStr(delegate { return found.Provider.ToString(); }) + "). This build places orders on "
                     + "SIMULATED accounts only, and carries no escalation flag by design.");
 
+            // ⛔⛔ RISK-GOVERNOR CONSULT (2026-08-17). MEASURED that day, and it is why this exists:
+            // a Sentinel risk container auto-flattened SimBURN-1 at its daily loss stop and LOCKED
+            // THE ACCOUNT OUT. A market order placed through THIS verb then FILLED on it -- 1 lot,
+            // status ok, no refusal, no error.
+            //
+            // ⭐ THE LESSON, and it is architectural rather than a bug: the container is a
+            // PARTICIPANT, not a PERIMETER. SentinelCore's own header says "that acts must consult
+            // it before acting" -- there is no interception layer. So every order path that does
+            // not ASK walks straight past a locked-out account: this verb, the DOM, a chart trade
+            // button, a hand-placed ticket. A lockout was a property of the asking ORDER SOURCE
+            // and never of the ACCOUNT.
+            //
+            // ⚠ REFLECTION, DELIBERATELY, NOT A DIRECT CALL. This AddOn is published standalone and
+            // must compile on a machine with no Sentinel suite present; a hard reference to
+            // SentinelCore would make it uncompilable there. Absent Sentinel this is a no-op and
+            // the verb behaves exactly as before -- fail-OPEN is correct here because this file
+            // cannot be the risk authority for a suite it may not be installed alongside. What it
+            // must never do is fail-open SILENTLY when Sentinel IS present and says no.
+            string govRefusal = SentinelGovernorRefusal(found);
+            if (govRefusal != null)
+                return OrderErr(id, "RISKLOCKED", "REFUSING: the Sentinel risk container has halted '"
+                    + name + "': " + govRefusal + ". Flatten and exit paths are unaffected; this "
+                    + "refusal applies to NEW positions only.");
+
             acct = found;
             return null;
+        }
+
+        /// <summary>Non-null reason when Sentinel says this account may not take a NEW position.
+        /// Null = permitted, or Sentinel is not installed. Never throws: a risk consult that can
+        /// crash the order path is a worse failure than the one it prevents.
+        ///
+        /// ⛔ TWO INDEPENDENT HALT MECHANISMS, AND THE FIRST CUT OF THIS WIRED ONLY ONE. v1 consulted
+        /// GetGovernorState().Status == "DayHalted" and the re-test STILL FILLED on a locked-out
+        /// account, because the DAILY-LOSS governor had rolled with the trading day while the
+        /// TRAILING-DRAWDOWN floor was still breaching every heartbeat. Two separate states, and
+        /// reasoning from the auto-flatten log alone could not tell them apart.
+        /// ⇒ Consult BOTH, and lead with DrawdownAllowsEntry -- the purpose-built "may this account
+        ///   take a new position" API that SentinelCore.CanEnter itself calls. Using the same
+        ///   predicate as the suite's own order sources is the point: a second implementation of
+        ///   "is this allowed" is a second thing to keep in sync, and it will drift.</summary>
+        private static bool _sentinelAbsentLogged;
+
+        private string SentinelGovernorRefusal(Account found)
+        {
+            try
+            {
+                // ⛔⛔ THE NAME WAS WRONG AND IT FAILED SILENTLY, 2026-08-17. v2 looked up
+                // "NinjaTrader.NinjaScript.AddOns.SentinelCore". The real namespace is
+                // ...AddOns.**Sentinel**.SentinelCore, so the lookup returned null, both consults
+                // were SKIPPED, and this method returned "permitted" WITH NO TRACE ANYWHERE. The
+                // probe filled three times and each fill looked like a policy decision.
+                // ⇒ I wrote a silent fail-open into the fix FOR a silent fail-open. The name is now
+                //   right, several candidates are tried, and — the part that matters more than the
+                //   name — NOT FINDING THE TYPE IS LOGGED. A guard that cannot say "I did not run"
+                //   is indistinguishable from a guard that ran and permitted.
+                Type core = null;
+                string[] candidates = new string[] {
+                    "NinjaTrader.NinjaScript.AddOns.Sentinel.SentinelCore",
+                    "NinjaTrader.NinjaScript.AddOns.SentinelCore",
+                };
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    foreach (var n in candidates)
+                    {
+                        core = asm.GetType(n, false);
+                        if (core != null) break;
+                    }
+                    if (core != null) break;
+                }
+                if (core == null)
+                {
+                    if (!_sentinelAbsentLogged)
+                    {
+                        _sentinelAbsentLogged = true;
+                        LogSafe("RISK CONSULT INERT: SentinelCore type not found — order placement is "
+                              + "NOT risk-gated on this box. Logged once. If the Sentinel suite IS "
+                              + "installed here, this is a BUG, not a configuration.");
+                    }
+                    return null;                                    // suite absent -> documented no-op
+                }
+
+                // 1) the TRAILING-DRAWDOWN floor: blocks when the cushion is thin.
+                var dd = core.GetMethod("DrawdownAllowsEntry",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                if (dd != null)
+                {
+                    object[] args = new object[] { found, null };
+                    object ok = dd.Invoke(null, args);
+                    // ⭐ LOG WHAT WAS READ, ALWAYS -- not only on refusal. Three probes in a row
+                    // filled and each looked like a policy decision; there was no way to tell a
+                    // guard that ran and permitted from a guard that never ran. An unobservable
+                    // decision is the same failure as a silent one.
+                    LogSafe("risk consult " + found.Name + ": DrawdownAllowsEntry=" +
+                            (ok == null ? "null" : ok.ToString()) +
+                            " reason=" + ((args[1] as string) ?? "-"));
+                    if (ok is bool && !((bool)ok))
+                        return "drawdown floor: " + ((args[1] as string) ?? "cushion exhausted");
+                }
+
+                // 2) the DAILY-LOSS governor, which is a DIFFERENT state on a DIFFERENT clock.
+                var gv = core.GetMethod("GetGovernorState",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
+                    null, new Type[] { typeof(string) }, null);
+                if (gv != null)
+                {
+                    object gs = gv.Invoke(null, new object[] { found.Name });
+                    if (gs != null)                                 // null = Core's documented FAIL-OPEN
+                    {
+                        var f = gs.GetType().GetField("Status");
+                        string status = f == null ? null : f.GetValue(gs) as string;
+                        // Only a HALT blocks. "DayComplete" is a trader who hit target and may
+                        // legitimately hold a winner; blocking there would be this file inventing a
+                        // rule the suite does not have, which is how a safety check becomes a bug.
+                        LogSafe("risk consult " + found.Name + ": governorStatus=" + (status ?? "null"));
+                        if (status == "DayHalted") return "governor status DayHalted";
+                    }
+                }
+                return null;
+            }
+            catch (Exception ex)
+            {
+                LogSafe("sentinel risk consult failed (allowing): " + Unwrap(ex));
+                return null;
+            }
         }
 
         // Poll an order to a settled state. ⭐ The lesson this codebase has paid for four times over:
