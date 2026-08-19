@@ -1425,6 +1425,18 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Returns a per-key result list so the caller can verify what landed where.
         // (Intended replacement for the manual "open SA tab + click everything" step
         //  before each backtest sweep.)
+        //
+        // ⚠ THE StrategyTemplate IS SWAPPED OUT WHEN "Strategy" IS WRITTEN. NT8 installs a
+        //   fresh instance of the newly selected strategy, so a template reference resolved
+        //   before the key loop then points at the PREVIOUS, detached object. SetValue on a
+        //   detached object does not throw, so every key after Strategy reported "set" and
+        //   echoed its value back while the tab kept its old data series -- and the backtest
+        //   that followed ran, successfully, on settings the caller believed it had replaced.
+        //   Two things are needed to close that, and only together:
+        //     1. resolve the targets PER KEY (rescues the keys written after the swap), and
+        //     2. write the swap keys FIRST (rescues the keys written before it).
+        //   Reported by Quantrosoft as issue #6 (verified on 8.1.8.2); fixed and re-verified
+        //   live on 8.1.6.3.
         private string RunConfigure(string id, string triggerJson)
         {
             Window saWin = FindStrategyAnalyzerWindow();
@@ -1439,16 +1451,23 @@ namespace NinjaTrader.NinjaScript.AddOns
                         StrategyAnalyzerViewModel vm = saWin.DataContext as StrategyAnalyzerViewModel;
                         StrategyAnalyzerTabControl tab = vm != null ? vm.SelectedTab : null;
                         if (tab == null) return BtErr(id, "no active SA tab");
-                        object tsp = tab.TabStrategyProperties;
-                        object strat = (tsp != null) ? tab.TabStrategyProperties.StrategyTemplate : null;
-                        object[] targets = new object[] { tab, tsp, strat };
                         string[] targetNames = new string[] { "tab", "tabStrategyProperties", "strategyTemplate" };
+                        // Called before EVERY write and again for every read-back. The template
+                        // this returns is only guaranteed to be the live one at the moment it is
+                        // asked for -- which is the whole lesson of issue #6.
+                        StrategyAnalyzerTabControl tabRef = tab;
+                        Func<object[]> resolve = new Func<object[]>(delegate
+                        {
+                            object tsp = tabRef.TabStrategyProperties;
+                            object strat = (tsp != null) ? tabRef.TabStrategyProperties.StrategyTemplate : null;
+                            return new object[] { tabRef, tsp, strat };
+                        });
                         var sb = new StringBuilder("{\"id\":").Append(JsonStr(id))
                             .Append(",\"status\":\"ok\",\"applied\":[");
                         bool first = true;
-                        foreach (var kv in prms)
+                        foreach (var kv in ConfigKeysSwapFirst(prms))
                         {
-                            string outcome = TrySetOnTargets(targets, targetNames, kv.Key, kv.Value);
+                            string outcome = TrySetOnTargets(resolve, targetNames, kv.Key, kv.Value);
                             if (!first) sb.Append(",");
                             sb.Append(outcome);
                             first = false;
@@ -1462,10 +1481,45 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { return BtErr(id, "configure outer: " + ex.Message); }
         }
 
+        // Keys whose write REPLACES tab.TabStrategyProperties.StrategyTemplate.
+        private static readonly string[] TemplateSwapKeys = new string[] { "Strategy" };
+
+        // ParseParams hands back a Dictionary, and Dictionary iteration order is not part of its
+        // contract -- so "Strategy processed last" was always reachable and was never a caller's
+        // typo. Hoisting the swap keys is what makes ONE configure call carrying Strategy plus
+        // data-series keys behave like the two-call workaround (Strategy alone, then the rest).
+        // Measured on the live SA tab: From / To / BarsPeriod / IsTickReplay are writable ONLY on
+        // the template, so those are precisely the keys a mis-ordered call drops. (Instrument-
+        // OrInstrumentList exists on tabStrategyProperties too, which is earlier in the target
+        // list and survives the swap -- which is why the instrument looked applied while the bar
+        // type and date range silently did not.)
+        private static List<KeyValuePair<string, string>> ConfigKeysSwapFirst(Dictionary<string, string> prms)
+        {
+            var swap = new List<KeyValuePair<string, string>>();
+            var rest = new List<KeyValuePair<string, string>>();
+            foreach (KeyValuePair<string, string> kv in prms)
+            {
+                bool isSwap = false;
+                for (int i = 0; i < TemplateSwapKeys.Length; i++)
+                    if (string.Equals(kv.Key, TemplateSwapKeys[i], StringComparison.OrdinalIgnoreCase)) { isSwap = true; break; }
+                (isSwap ? swap : rest).Add(kv);
+            }
+            swap.AddRange(rest);
+            return swap;
+        }
+
         // Walk targets in order; first one with a writable property of matching name wins.
         // Returns one JSON object per key: {"key":..,"target":..,"status":"set|skip|error",..}
-        private static string TrySetOnTargets(object[] targets, string[] names, string key, string token)
+        //
+        // `resolve` is invoked for the write and AGAIN for the read-back, so "nowReads" comes off
+        // a freshly resolved chain rather than off the reference just written to. That is the
+        // point: a detached StrategyTemplate reads its own value back quite happily -- only the
+        // live chain shows the tab still holding the old one. It is reported as a VALUE and never
+        // as a verdict, because setters legitimately transform (BarsPeriod "77077:120:1" reads
+        // back as "Wave 120"), and an equality check here would manufacture false failures.
+        private static string TrySetOnTargets(Func<object[]> resolve, string[] names, string key, string token)
         {
+            object[] targets = resolve();
             for (int ti = 0; ti < targets.Length; ti++)
             {
                 if (targets[ti] == null) continue;
@@ -1476,7 +1530,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     object v = ConvertConfigToken(token, p.PropertyType);
                     p.SetValue(targets[ti], v, null);
                     return "{\"key\":" + JsonStr(key) + ",\"target\":" + JsonStr(names[ti])
-                         + ",\"status\":\"set\",\"to\":" + JsonStr(v != null ? v.ToString() : "null") + "}";
+                         + ",\"status\":\"set\",\"to\":" + JsonStr(v != null ? v.ToString() : "null")
+                         + ",\"nowReads\":" + JsonStr(ReadBackLive(resolve, names, names[ti], key)) + "}";
                 }
                 catch (Exception ex)
                 {
@@ -1485,6 +1540,28 @@ namespace NinjaTrader.NinjaScript.AddOns
                 }
             }
             return "{\"key\":" + JsonStr(key) + ",\"status\":\"skip\",\"message\":\"no writable property of this name on tab/tabStrategyProperties/strategyTemplate\"}";
+        }
+
+        // Read `key` back off a FRESHLY resolved target of the same name, so the answer describes
+        // the tab rather than the object we happen to be holding. Never throws and never fails the
+        // write it reports on: evidence that can break the call it is observing is worse than none.
+        private static string ReadBackLive(Func<object[]> resolve, string[] names, string targetName, string key)
+        {
+            try
+            {
+                object[] fresh = resolve();
+                for (int ti = 0; ti < fresh.Length && ti < names.Length; ti++)
+                {
+                    if (names[ti] != targetName) continue;
+                    if (fresh[ti] == null) return "(target is null)";
+                    PropertyInfo p = fresh[ti].GetType().GetProperty(key, BindingFlags.Public | BindingFlags.Instance);
+                    if (p == null || !p.CanRead) return "(unreadable)";
+                    object v = p.GetValue(fresh[ti], null);
+                    return v != null ? v.ToString() : "null";
+                }
+                return "(target gone)";
+            }
+            catch (Exception ex) { return "(read-back failed: " + ex.Message + ")"; }
         }
 
         // Type-aware token -> value conversion. Extends ConvertToken with Instrument

@@ -4,6 +4,48 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-08-19
+
+### Fixed
+
+- **`configure` wrote to a discarded strategy template, and reported success for every key it
+  lost.** Writing `Strategy` makes NinjaTrader install a *fresh* `StrategyTemplate` instance, but
+  the write targets were resolved once before the key loop — so every key processed after
+  `Strategy` landed on the previous, now-detached object. `PropertyInfo.SetValue` on a detached
+  object does not throw, so each one returned `"status": "set"` with its value echoed back while
+  the Strategy Analyzer kept its old data series. **The result was not a failed call but a
+  successful-looking backtest on settings the caller believed it had replaced.** Reported by
+  [@Quantrosoft](https://github.com/Quantrosoft) in #6, with a repro whose run kept `Tick 1` +
+  Tick Replay over a far wider range than requested, grew to 232 GB resident and stopped
+  responding.
+
+  Two changes close it, and only together:
+
+  1. **Targets are re-resolved per key**, which rescues the keys written after the swap.
+  2. **Template-swapping keys are applied first**, which rescues the keys written before it.
+     `ParseParams` returns a `Dictionary`, and dictionary iteration order is not part of its
+     contract — "`Strategy` processed last" was always reachable, and in that ordering
+     re-resolution alone saves nothing.
+
+  Probed on a live SA tab: `From`, `To`, `BarsPeriod` and `IsTickReplay` are writable **only** on
+  the template, so those four are exactly what a mis-ordered call drops.
+  `InstrumentOrInstrumentList` also exists on `TabStrategyProperties`, which is earlier in the
+  target list and survives the swap — which is why the instrument looked applied while the bar type
+  and date range silently did not.
+
+### Added
+
+- **`applied[].nowReads`** — every `set` now reports what the tab holds afterwards, read back off a
+  **freshly resolved** chain rather than off the reference just written to. A read-back from the
+  object you wrote to would have passed cleanly in the bug above: a detached template echoes its own
+  value quite happily, and only the live chain shows the tab still holding the old one. It is a
+  **value, never a verdict** — setters legitimately transform (`BarsPeriod "77077:120:1"` reads back
+  as `"Wave 120"`), and an equality check there would manufacture false failures. Additive, so an
+  existing `status == "set"` check is unaffected.
+
+Verified live on 8.1.6.3 with `Strategy` deliberately listed **last** in the params map: it is
+applied first, and all six keys land, confirmed by an independent `probe` read-back afterwards.
+
 ## [1.5.0] - 2026-08-04
 
 Four **read-only** commands that answer questions which previously required an RDP session. Each one

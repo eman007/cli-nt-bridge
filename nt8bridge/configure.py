@@ -16,8 +16,16 @@ Wire format mirrors backtest: send the whole config dict; AddOn reads `params`
 and routes each key. Tab-level keys (Instrument, FromLocal, ToLocal, BarsPeriod, …)
 land on the tab; per-strategy params land on the template. Same call works for both.
 
+Key ORDER is not the caller's to control and does not need to be: the AddOn applies
+`Strategy` first, because writing it makes NT8 install a fresh StrategyTemplate and
+anything already written to the old one is discarded without an error (issue #6).
+
 Response:
-  {id, status, applied:[{key,target,status:set|skip|error,...}, ...]}
+  {id, status, applied:[{key,target,status:set|skip|error,to,nowReads}, ...]}
+
+`nowReads` is what the LIVE tab holds after the write, re-read off a freshly resolved
+target rather than off the object just written to. It is a value, not a verdict --
+setters legitimately transform (BarsPeriod "77077:120:1" reads back as "Wave 120").
 """
 from __future__ import annotations
 

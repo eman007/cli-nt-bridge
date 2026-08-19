@@ -177,7 +177,7 @@ python -m nt8bridge sweep --config config/config.json --instruments "MNQ 09-26" 
 Automate the SA tab so a sweep needs no manual clicking:
 
 - `probe` — dumps the SA tab / `TabStrategyProperties` / strategy-template **writable property names** (NT8's members are partly obfuscated, so discover before you write).
-- `configure --config c.json` — writes each key in the config onto whichever of (tab, tab-strategy-properties, template) has a matching writable property; type-aware (Instrument, DateTime, BarsPeriod, enums). Returns a per-key `applied[]` status (`set`/`skip`/`error`).
+- `configure --config c.json` — writes each key in the config onto whichever of (tab, tab-strategy-properties, template) has a matching writable property; type-aware (Instrument, DateTime, BarsPeriod, enums). Returns a per-key `applied[]` status (`set`/`skip`/`error`), each `set` carrying **`nowReads`** — the value the *live* tab holds afterwards, re-read off a freshly resolved chain rather than off the object just written to. `Strategy` is always applied **first**, because writing it makes NT8 install a fresh strategy template and anything written to the old one is silently discarded (see the 1.5.1 note in the changelog).
 - `peek` — reads the SA tab's latest completed result **plus a read-back of the injected params**, without firing a new Run — useful to capture a result a watcher missed, and to confirm param injection actually took.
 
 ### histget & histdump — replay data export
