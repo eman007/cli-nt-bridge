@@ -4,6 +4,65 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-08-20
+
+### Added
+
+- **`strategies` — read, and change, the enabled state of the Control Center's strategies.**
+
+  ```bash
+  python -m nt8bridge strategies                        # what is enabled, and is it running?
+  python -m nt8bridge strategies --enable 'My Strategy' # turn it back on
+  python -m nt8bridge strategies --disable X --dry-run  # what would happen, clicking nothing
+  ```
+
+  An explicit `Connection.Disconnect()` disables every running strategy, and NinjaTrader restores
+  none of them — not on reconnect, and **not on an app restart either**. So "are my strategies
+  running on that machine?" needed a remote desktop session, and "no" needed a human clicking
+  checkboxes.
+
+  Distinct from `workspace`, which walks the **chart** windows: this reads the **Control Center**
+  grid, the other population of strategies and the one a connection cycle turns off. Neither is a
+  superset of the other.
+
+  Two things the contract deliberately refuses to collapse:
+
+  - **`enabled` is not proof a strategy is running.** `enabled` is the grid checkbox — it says the
+    click landed. The evidence is the strategy's own `state` reaching `Realtime`, so every row
+    returns both, and an acting call waits `--settle-ms` (default 3000) before re-reading.
+    Anything clicked but not yet there comes back under `unverified`, telling the caller to
+    **re-read, not re-click** — a strategy loading historical data is legitimately mid-transition,
+    and a second click would toggle it back off. Where the two readings disagree, believe `state`.
+  - **`--disable` does not flatten.** It stops the strategy *managing* what it holds; the position
+    and any working orders remain. So it refuses when the strategy's **account** has exposure on
+    its instrument (the strategy-level view can read flat while the account still carries the
+    fill), and `--force` is the deliberate override.
+
+  Exit `0` did what was asked · `1` could not reach the grid · `2` partially — refused, not in the
+  grid, or enabled without reaching `Realtime` in time. Enabling something already running is `0`,
+  not `2`: "make sure X is on" is the normal shape of an unattended caller and failing its no-op
+  would make every retry look like a failure. Skips carry a machine-readable `code`
+  (`alreadyEnabled`, `alreadyDisabled`, `notInGrid`, `exposure`, `bothLists`, `clickFailed`) so
+  callers branch on that rather than on the prose.
+
+  Implementation notes, because none of this is a published API: `ControlCenter.Instance` is the
+  only way in (NinjaTrader's real windows are not in `Application.Current.Windows`); the Control
+  Center owns a UI thread separate from `Globals.MainThreadDispatcher`, and a read from the wrong
+  one throws in a way reflection turns into a convincing `null`; and the Strategies tab is
+  virtualized while inactive, so the grid must be materialized by cycling tabs and the user's tab
+  restored afterwards. Then the surprising part: setting `StrategiesGridEntry.IsEnabled = true`
+  does **not** start the strategy, and neither does executing the grid's routed commands — only
+  the checkbox's `Checked` routed event does, so the AddOn clicks the real checkbox via
+  `ButtonBase.OnClick()`. In-process; no synthetic mouse or keystrokes.
+
+### Fixed
+
+- **README listed 24 commands; 32 had shipped.** The eight added by the merged pull requests
+  (`reload`, `regions`, `restart`, `windows`, `ntstatus`, `workspace`, `playback`, `screenshot`)
+  reached the CLI but never the grouped command list — five of them appeared nowhere in the README
+  at all. The list now covers all 33 (32 plus `strategies`), with a new **Read-only state** group
+  for the ones that just answer "what is this NinjaTrader doing right now".
+
 ## [1.5.1] - 2026-08-19
 
 ### Fixed

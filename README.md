@@ -69,7 +69,7 @@ Set up a Strategy Analyzer tab once (strategy, instrument, dates, commission); `
 
 ## Commands
 
-24 commands, grouped by what they do:
+33 commands, grouped by what they do:
 
 **Setup & diagnostics**
 ```
@@ -77,8 +77,21 @@ doctor        check preconditions (NT8 dir, AddOn compiled)
 precheck      offline compile gate (optional; see note)
 deploy        atomic copy a .cs into bin/Custom (--kind strategy|indicator|addon)
 compile       compile INSIDE NinjaTrader, return its real Roslyn errors
+reload        compile AND load it (what F5 does) — DISRUPTIVE, see below
+regions       find/strip DUPLICATED NinjaScript generated regions
+restart       restart NinjaTrader
+windows       inventory NinjaTrader's top-level windows
 probe         dump the SA tab's writable property names (discover names for `configure`)
 peek          read the SA tab's latest result + param read-back, without a new Run
+```
+
+**Read-only state** — what is this NinjaTrader actually doing right now?
+```
+ntstatus      is NT running the code on disk? (catches a stale DLL; exit 2 if so)
+workspace     charts + indicators + strategies on them, and their State
+strategies    Control Center strategies: enabled AND running? --enable/--disable to change
+playback      replay transport: clock, MOVING?, speed, .nrd coverage
+screenshot    capture a window (or the screen) as PNG
 ```
 
 **Backtesting**
@@ -234,6 +247,51 @@ Out-of-band recovery that works independently of whatever feed your strategy use
 - `feedhealth --instrument 'MNQ 09-26'` — reports each watched instrument's **last-tick age**, so a feed NinjaTrader still calls `connected` but whose ticks have stopped (a "dark" feed) is detectable. A tick older than a threshold is a frozen feed.
 - `feedwatch --instrument 'MNQ 09-26'` — a detect-only loop that alerts (durable jsonl + stdout) when a watched feed freezes past a grace period. Deliberately detect-only: thawing a frozen feed needs an operator to cycle NinjaTrader.
 
+### strategies — is it enabled, and is it actually running?
+
+Reads, and changes, the enabled state of the strategies in the Control Center's **Strategies** tab.
+
+```bash
+python -m nt8bridge strategies                          # read: what is enabled, and is it running?
+python -m nt8bridge strategies --strategy Breakout      # assert one is at state=Realtime (exit 2 if not)
+python -m nt8bridge strategies --enable 'Morning Breakout'   # turn it back on
+python -m nt8bridge strategies --disable X --dry-run    # what would happen, clicking nothing
+```
+
+Returns `{status, gridResolved, strategies:[{name, type, enabled, state, account, instrument}],
+changed:[…], skipped:[{name, code, reason}], notes:[…]}`. Skip `code`s — branch on these, not on the
+prose — are `alreadyEnabled`, `alreadyDisabled`, `notInGrid`, `exposure`, `bothLists`, `clickFailed`.
+
+Exit **0** did what was asked · **1** could not reach the grid, or the AddOn errored · **2** partially:
+refused by the exposure guard, not in the grid, or enabled without `state` reaching `Realtime` before
+the settle expired.
+
+**Why it exists.** An explicit `Connection.Disconnect()` disables every running strategy, and NinjaTrader
+restores none of them — not on reconnect, and **not on an app restart either**. So "are my strategies
+running on that machine?" needed a remote desktop session, and "no" needed a human clicking checkboxes.
+
+**`strategies` vs `workspace`.** `workspace` walks the **chart** windows, so it sees chart-attached
+strategies. `strategies` reads the **Control Center** grid — the other population, and the one a
+connection cycle turns off. Neither is a superset of the other.
+
+> ⚠ **`enabled` is not proof a strategy is running.** `enabled` is the grid checkbox: it says the click
+> landed. The evidence is the strategy's own `state` reaching `Realtime`, which is why every row carries
+> both and why an acting call waits `--settle-ms` (default 3000) before re-reading. Where they disagree,
+> believe `state`. Rows reported under `unverified` were clicked but had not reached `Realtime` yet —
+> **re-read rather than clicking again**; a strategy loading historical data is legitimately
+> mid-transition, and a second click would toggle it back off.
+
+> ⚠ **`--disable` does not flatten.** It stops the strategy *managing* what it holds; the position and
+> any working orders remain. So `--disable` refuses when the strategy's account has exposure on its
+> instrument, and `--force` is the deliberate override. The guard checks the **account's** position
+> rather than the strategy's own, because the strategy-level view can read flat while the account still
+> carries the fill.
+
+Enabling something already running exits **0**, not 2 — "make sure X is on" is the normal shape of an
+unattended caller, and failing its no-op would make every retry look like a failure. The exception is
+`alreadyEnabled` on a row whose `state` is *not* live: an enabled checkbox above a `Terminated` strategy
+is the looks-healthy-but-isn't case, and the checkbox is the less trustworthy of the two readings.
+
 ### chartseries
 
 Change a **live** chart's data series (instrument and/or bar type + period) from the CLI:
@@ -276,6 +334,7 @@ python -m nt8bridge peek                                   # re-read the result 
 - **Backtest:** it locates the open Strategy Analyzer window via `NinjaTrader.Core.Globals.AllWindows`, reads its `StrategyAnalyzerViewModel`, injects params onto the configured `StrategyTemplate`, and **executes the Run `RoutedCommand`** — exactly what the Run button does, so NinjaTrader runs it correctly on a background thread. Do **not** call `StrategyRunner.RunStrategyAsync` directly: on the SA UI thread it deadlocks and crashes NinjaTrader.
 - **Data export:** `histdump` decodes the `.nrd` binary **offline** (a 44-slot header + a variable-length event stream) straight to L1/L2 parquet — verified byte-exact against NT8's `MarketReplay.DumpMarketDepth`, which `--nt8` still drives for the legacy CSV path.
 - **Live reads:** `account`, `performance`, `feedhealth` use public NT8 APIs; `perfwindow` and `chartseries` read non-public view-model / chart internals via reflection.
+- **Strategy enablement:** `strategies` drives the Control Center's own grid, and three things have to be true at once or it silently returns nothing. NinjaTrader's real windows are **not** in `Application.Current.Windows` (only custom AddOn windows are), so the static `ControlCenter.Instance` is the only way in. The Control Center owns a UI thread **separate** from `Globals.MainThreadDispatcher`, and a WPF read from the wrong one throws "calling thread cannot access this object", which reflection re-wraps and a silent `catch` turns into a convincing `null` — so every read is marshalled onto `((DispatcherObject)cc).Dispatcher`, on a *bounded* `Invoke` so a saturated UI thread cannot wedge the poller. And the Strategies tab is **virtualized while inactive**, so the grid isn't in the visual tree until its tab is selected; the command cycles tabs to materialize it and restores yours afterwards. Then the part that is genuinely surprising: setting `StrategiesGridEntry.IsEnabled = true` **does not start the strategy** — the read-back says `True` and nothing runs. Neither does executing the grid's `EnableStrategyCommand` (it acts on the grid *selection*, which is unset, so `CanExecute` is false) nor its per-row sibling, which *does* execute and *does* flip the bool while the strategy stays stopped. What starts it is the checkbox's `Checked` **routed event**, which executing a command never raises — so the AddOn clicks the real checkbox via `ButtonBase.OnClick()`. In-process; no synthetic mouse or keystrokes.
 
 These reach into NinjaTrader's non-public internals, so they may need adjusting across NinjaTrader versions. The bridge is built to fail **loud** where it can (a moved type fails at compile/deploy time), and the two commands that read non-public members defensively — `perfwindow` (via its `feesCalculated` flag) and `chartseries` (fail-closed) — tell you when they can't trust what they read rather than returning a wrong answer.
 

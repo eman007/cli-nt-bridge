@@ -159,6 +159,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     WriteResult("ntstatus_" + id + ".json", RunNtStatus(id));
                 else if (kind == "workspace")
                     WriteResult("workspace_" + id + ".json", RunWorkspace(id));
+                else if (kind == "strategies")
+                    WriteResult("strategies_" + id + ".json", RunStrategies(id, text));
                 else if (kind == "screenshot")
                     WriteResult("screenshot_" + id + ".json", RunScreenshot(id, text));
                 else if (kind == "peek")
@@ -207,6 +209,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (kind == "playback") return "playback_";
             if (kind == "ntstatus") return "ntstatus_";
             if (kind == "workspace") return "workspace_";
+            if (kind == "strategies") return "strategies_";
             if (kind == "screenshot") return "screenshot_";
             if (kind == "peek") return "peek_";
             if (kind == "probe") return "probe_";
@@ -805,6 +808,543 @@ namespace NinjaTrader.NinjaScript.AddOns
                 catch { }
             }
             return null;
+        }
+
+        // ── strategies ──────────────────────────────────────────────────────────────────────────────────
+        //  Read — and change — the ENABLED state of the strategies in the Control Center's Strategies tab.
+        //
+        //  ⭐ WHY THIS IS NOT `workspace`. `workspace` walks the chart windows, so it sees only strategies
+        //  attached to a chart. The Control Center grid is the other population — strategies added in the
+        //  Strategies tab itself — and it is the one that a connection cycle turns OFF: an explicit
+        //  Connection.Disconnect() disables every running strategy, and NT8 restores none of them, not on
+        //  reconnect and not on an app restart. Answering "is it enabled, and if not turn it back on" from
+        //  a script is the difference between a box that heals and a box that needs an RDP session.
+        //
+        //  ⚠ NT8 PUBLISHES NO API FOR ANY OF THIS. Everything below is reflection into the Control Center's
+        //  own WPF tree, and three separate things make the naive version silently return nothing:
+        //
+        //    1. NT8's real windows are NOT in Application.Current.Windows (only custom AddOn windows are),
+        //       so you cannot enumerate to the Control Center. The static ControlCenter.Instance is the way in.
+        //    2. The Control Center runs on its OWN UI thread — a different one from
+        //       Globals.MainThreadDispatcher. A WPF read from the wrong thread throws "calling thread cannot
+        //       access this object", reflection re-wraps that as TargetInvocationException, and a silent
+        //       catch turns every read into null — which reads exactly like "the grid isn't there".
+        //    3. The Strategies tab is VIRTUALIZED while inactive, so the grid is not in the visual tree
+        //       until its tab is selected. Cycle SelectedIndex until it materializes, then put the user's
+        //       tab back.
+        //
+        //  ⭐ AND THE PART THAT COST THE MOST: setting StrategiesGridEntry.IsEnabled = true DOES NOT START
+        //  THE STRATEGY. The read-back says True and nothing runs — it is a one-way mirror of grid state.
+        //  Executing the grid's EnableStrategyCommand fails CanExecute (it acts on the grid SELECTION,
+        //  which is unset); the per-row EnableDisableSingleStrategyCommand does execute and does flip the
+        //  bool, and the strategy still does not start. What starts it is the checkbox's `Checked` routed
+        //  event, which executing a command never raises. So we click the real checkbox:
+        //  ButtonBase.OnClick() (protected, via reflection) — a genuine user click, fully in-process, no
+        //  synthetic mouse or keys.
+        //
+        //  ⚠ THIS REACH IS DUPLICATED. A companion connection-recovery AddOn (`AutoReconnect.cs`, not
+        //  shipped in this repo) carries its own copy — WithStrategiesGrid / GridEntries /
+        //  ToggleEnableCheckbox — because an explicit Disconnect() disables strategies and it has to put
+        //  them back. The copy is deliberate: either AddOn has to work when installed alone. But both
+        //  decode the same undocumented WPF tree, so a fix here almost certainly belongs there too.
+        //
+        //  ⚠ `enabled` (the grid's bool) IS NOT PROOF THE STRATEGY IS RUNNING. It says the click landed.
+        //  The evidence is the strategy's own `state` reaching Realtime, which is why every row carries
+        //  both and why an acting call re-reads after a settle. Believe `state`.
+        //
+        //  request : {"id","kind":"strategies","enable":"A,B","disable":"C",
+        //             "dryRun":true,"force":true,"settleMs":"3000"}
+        //  response: {"id","status","ts","gridResolved":bool,
+        //             "strategies":[{name,type,enabled,state,account,instrument}]|null,
+        //             "changed":[{name,from,to,clicked,enabled,state}],
+        //             "skipped":[{name,code,reason}], "notes":[str], "errors":[...]}
+        //  skip codes: alreadyEnabled | alreadyDisabled | notInGrid | exposure | bothLists | clickFailed
+        private const double GridInvokeTimeoutSeconds = 20.0;
+
+        // One grid row, snapshotted off the UI thread so the plan can be computed without holding it.
+        private class StratRow
+        {
+            public string Name;
+            public string Type;
+            public bool Enabled;
+            public string State;
+            public string Account;
+            public string Instrument;
+        }
+
+        private string RunStrategies(string id, string text)
+        {
+            var notes = new List<string>();
+            var changed = new List<string>();
+            var skipped = new List<string>();
+            try
+            {
+                List<string> wantOn = SplitNames(ExtractJsonString(text, "enable"));
+                List<string> wantOff = SplitNames(ExtractJsonString(text, "disable"));
+                bool dryRun = JsonBoolFlag(text, "dryRun");
+                bool force = JsonBoolFlag(text, "force");
+                int settleMs = 3000;
+                try { string s = ExtractJsonString(text, "settleMs"); if (!string.IsNullOrEmpty(s)) settleMs = int.Parse(s, InvCi); } catch { }
+                if (settleMs < 0) settleMs = 0;
+                if (settleMs > 30000) settleMs = 30000;   // the poller thread is blocked for this long
+
+                // PHASE 1 — read the grid.
+                List<StratRow> rows = WithStrategiesGrid<List<StratRow>>(delegate(object grid) { return SnapshotGrid(grid); }, notes);
+                if (rows == null)
+                    return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"gridResolved\":false,\"strategies\":null"
+                         + ",\"changed\":[],\"skipped\":[],\"notes\":[" + JoinJsonStrings(notes) + "]"
+                         + ",\"errors\":[{\"code\":\"BRIDGE\",\"message\":\"could not reach the Control Center StrategiesGrid\"}]}";
+
+                // PHASE 2 — plan, OFF the UI dispatcher. The disable guard reads Account.All/Positions/Orders,
+                // and taking a Cbi lock on the Control Center's UI thread is how you deadlock a platform whose
+                // Cbi callbacks marshal back to that same thread. Read here, act on the dispatcher later.
+                var toClick = new List<string>();
+                var wanted = new List<string>();
+                foreach (string n in wantOn) if (!wanted.Contains(n)) wanted.Add(n);
+                foreach (string n in wantOff) if (!wanted.Contains(n)) wanted.Add(n);
+                foreach (string name in wanted)
+                {
+                    bool on = wantOn.Contains(name);
+                    // Named in BOTH lists. Which list won would be decided by the order they were merged
+                    // in, and neither answer is defensible for something that starts or stops a live
+                    // strategy — so do nothing and say why.
+                    if (on && wantOff.Contains(name))
+                    {
+                        skipped.Add(SkipJson(name, "bothLists", "named in both enable and disable"));
+                        continue;
+                    }
+                    StratRow row = null;
+                    foreach (StratRow r in rows)
+                        if (string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)) { row = r; break; }
+                    if (row == null) { skipped.Add(SkipJson(name, "notInGrid", "not in the Control Center strategies grid")); continue; }
+                    if (row.Enabled == on)
+                    {
+                        skipped.Add(SkipJson(name, on ? "alreadyEnabled" : "alreadyDisabled",
+                                             (on ? "already enabled" : "already disabled")
+                                             + " (state=" + (row.State ?? "unknown") + ")"));
+                        continue;
+                    }
+                    if (!on && !force)
+                    {
+                        // Disabling a strategy does NOT flatten what it is holding — it stops managing it.
+                        // An open position or a working order left with nobody minding it is the one
+                        // outcome this verb must never cause by accident, so it is opt-in via force.
+                        string why = ExposureGuard(row);
+                        if (why != null) { skipped.Add(SkipJson(name, "exposure", why + " — pass force to disable anyway")); continue; }
+                    }
+                    toClick.Add(name);
+                }
+
+                if (toClick.Count > 0 && !dryRun)
+                {
+                    // PHASE 3 — click, back on the Control Center's dispatcher.
+                    var clicked = WithStrategiesGrid<List<string>>(delegate(object grid)
+                    {
+                        var okd = new List<string>();
+                        foreach (string name in toClick)
+                            if (ClickEnabledCheckbox(grid, name, wantOn.Contains(name), notes)) okd.Add(name);
+                        return okd;
+                    }, notes) ?? new List<string>();
+
+                    foreach (string name in toClick)
+                        if (!clicked.Contains(name)) skipped.Add(SkipJson(name, "clickFailed", "the Enabled checkbox for this row could not be clicked"));
+
+                    // PHASE 4 — settle, then re-read. Enabling is asynchronous: the click returns long
+                    // before the strategy walks Configure -> DataLoaded -> Realtime, so an immediate
+                    // re-read reports a transitional state and looks like a failure.
+                    if (clicked.Count > 0 && settleMs > 0) Thread.Sleep(settleMs);
+                    List<StratRow> after = WithStrategiesGrid<List<StratRow>>(delegate(object grid) { return SnapshotGrid(grid); }, notes);
+                    if (after != null) rows = after;
+                    else notes.Add("post-click re-read failed; the `strategies` list is the state BEFORE the clicks");
+
+                    foreach (string name in clicked)
+                    {
+                        bool on = wantOn.Contains(name);
+                        StratRow now = null;
+                        foreach (StratRow r in rows)
+                            if (string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)) { now = r; break; }
+                        changed.Add("{\"name\":" + JsonStr(name)
+                                  + ",\"from\":" + (on ? "false" : "true") + ",\"to\":" + (on ? "true" : "false")
+                                  + ",\"clicked\":true"
+                                  + ",\"enabled\":" + (now != null && now.Enabled ? "true" : "false")
+                                  + ",\"state\":" + JsonStrOrNull(now != null ? now.State : null) + "}");
+                    }
+                    LogSafe("STRATEGIES enable=[" + string.Join(",", wantOn.ToArray()) + "] disable=[" + string.Join(",", wantOff.ToArray())
+                            + "] clicked=" + clicked.Count + " skipped=" + skipped.Count + (force ? " FORCE" : ""));
+                }
+                else if (toClick.Count > 0)
+                {
+                    foreach (string name in toClick)
+                    {
+                        bool on = wantOn.Contains(name);
+                        changed.Add("{\"name\":" + JsonStr(name)
+                                  + ",\"from\":" + (on ? "false" : "true") + ",\"to\":" + (on ? "true" : "false")
+                                  + ",\"clicked\":false,\"enabled\":" + (on ? "false" : "true") + ",\"state\":null}");
+                    }
+                    notes.Add("dryRun: nothing was clicked");
+                }
+
+                var sb = new StringBuilder();
+                sb.Append("{\"id\":").Append(JsonStr(id))
+                  .Append(",\"status\":\"ok\",\"ts\":").Append(JsonStr(DateTime.UtcNow.ToString("o")))
+                  .Append(",\"gridResolved\":true,\"dryRun\":").Append(dryRun ? "true" : "false")
+                  .Append(",\"strategies\":[");
+                for (int i = 0; i < rows.Count; i++)
+                {
+                    if (i > 0) sb.Append(",");
+                    StratRow r = rows[i];
+                    sb.Append("{\"name\":").Append(JsonStrOrNull(r.Name))
+                      .Append(",\"type\":").Append(JsonStrOrNull(r.Type))
+                      .Append(",\"enabled\":").Append(r.Enabled ? "true" : "false")
+                      .Append(",\"state\":").Append(JsonStrOrNull(r.State))
+                      .Append(",\"account\":").Append(JsonStrOrNull(r.Account))
+                      .Append(",\"instrument\":").Append(JsonStrOrNull(r.Instrument))
+                      .Append("}");
+                }
+                sb.Append("],\"changed\":[").Append(string.Join(",", changed.ToArray()))
+                  .Append("],\"skipped\":[").Append(string.Join(",", skipped.ToArray()))
+                  .Append("],\"notes\":[").Append(JoinJsonStrings(notes)).Append("]}");
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"gridResolved\":false,\"strategies\":null"
+                     + ",\"changed\":[],\"skipped\":[],\"notes\":[" + JoinJsonStrings(notes) + "]"
+                     + ",\"errors\":[{\"code\":\"BRIDGE\",\"message\":" + JsonStr(ex.GetType().Name + ": " + ex.Message) + "}]}";
+            }
+        }
+
+        private static List<string> SplitNames(string csv)
+        {
+            var outp = new List<string>();
+            if (string.IsNullOrEmpty(csv)) return outp;
+            foreach (string p in csv.Split(','))
+            {
+                string t = p.Trim();
+                if (t.Length > 0 && !outp.Contains(t)) outp.Add(t);
+            }
+            return outp;
+        }
+
+        // `code` exists so a caller can branch without matching on prose. It matters most for
+        // "alreadyEnabled": asking to enable something already running is the normal shape of an
+        // idempotent caller, and reporting that identically to "refused, it holds a position" would make
+        // every retry look like a failure.
+        // JsonStr renders null as "" — fine for a label, wrong for `state`. "we could not read this
+        // strategy's state" and "its state is the empty string" are different claims, and the whole point
+        // of returning `state` alongside `enabled` is that a caller can trust it over the checkbox.
+        private static string JsonStrOrNull(string s)
+        {
+            return s == null ? "null" : JsonStr(s);
+        }
+
+        private static string SkipJson(string name, string code, string reason)
+        {
+            return "{\"name\":" + JsonStr(name) + ",\"code\":" + JsonStr(code) + ",\"reason\":" + JsonStr(reason) + "}";
+        }
+
+        private static string JoinJsonStrings(List<string> items)
+        {
+            var sb = new StringBuilder();
+            for (int i = 0; i < items.Count; i++) { if (i > 0) sb.Append(","); sb.Append(JsonStr(items[i])); }
+            return sb.ToString();
+        }
+
+        // Non-null reason when disabling this strategy would orphan live exposure. Deliberately checks the
+        // ACCOUNT's position and working orders on the instrument, not the strategy's own position: the
+        // strategy-level view can read flat while the account still carries the fill, and the conservative
+        // reading is the one worth defaulting to for something a script can trigger unattended.
+        private string ExposureGuard(StratRow row)
+        {
+            if (row == null || string.IsNullOrEmpty(row.Account)) return null;
+            try
+            {
+                Account acct = null;
+                try { lock (Account.All) { foreach (Account a in Account.All) { if (a.Name == row.Account) { acct = a; break; } } } } catch { }
+                if (acct == null) return null;
+
+                string qty = null;
+                try
+                {
+                    lock (acct.Positions)
+                    {
+                        foreach (Position p in acct.Positions)
+                        {
+                            string mp = SafeStr(delegate { return p.MarketPosition.ToString(); });
+                            if (mp == "Flat" || mp == "") continue;
+                            string fn = SafeStr(delegate { return p.Instrument.FullName; });
+                            if (!string.IsNullOrEmpty(row.Instrument) && fn != row.Instrument) continue;
+                            qty = mp + " " + SafeInt(delegate { return p.Quantity; }).ToString(InvCi) + " " + fn;
+                            break;
+                        }
+                    }
+                }
+                catch { }
+                if (qty != null) return "open position on " + row.Account + " (" + qty + ")";
+
+                int working = 0;
+                try
+                {
+                    lock (acct.Orders)
+                    {
+                        foreach (Order o in acct.Orders)
+                        {
+                            if (!IsWorkingState(SafeStr(delegate { return o.OrderState.ToString(); }))) continue;
+                            string fn = SafeStr(delegate { return o.Instrument.FullName; });
+                            if (!string.IsNullOrEmpty(row.Instrument) && fn != row.Instrument) continue;
+                            working++;
+                        }
+                    }
+                }
+                catch { }
+                if (working > 0) return working + " working order(s) on " + row.Account;
+            }
+            catch (Exception ex) { LogSafe("ExposureGuard: " + ex.Message); }
+            return null;
+        }
+
+        // Reach ControlCenter.Instance. NT8's real windows are not enumerable via Application.Current.Windows.
+        private static object GetControlCenter()
+        {
+            try
+            {
+                Type cc = Type.GetType("NinjaTrader.Gui.ControlCenter, NinjaTrader.Gui");
+                if (cc == null) return null;
+                foreach (string sm in new[] { "Instance", "Current" })
+                {
+                    PropertyInfo sp = cc.GetProperty(sm, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                    if (sp != null) { object v = sp.GetValue(null, null); if (v != null) return v; }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static System.Windows.DependencyObject FindDescendantByTypeName(System.Windows.DependencyObject root, string contains)
+        {
+            try
+            {
+                int n = System.Windows.Media.VisualTreeHelper.GetChildrenCount(root);
+                for (int i = 0; i < n; i++)
+                {
+                    System.Windows.DependencyObject child = System.Windows.Media.VisualTreeHelper.GetChild(root, i);
+                    if (child == null) continue;
+                    if (child.GetType().Name.IndexOf(contains, StringComparison.OrdinalIgnoreCase) >= 0) return child;
+                    System.Windows.DependencyObject deeper = FindDescendantByTypeName(child, contains);
+                    if (deeper != null) return deeper;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // Run `fn` against the live StrategiesGrid on the Control Center's OWN dispatcher, with the
+        // Strategies tab realized, then restore the user's tab. Returns default(T) — for a reference type,
+        // null — when the grid could not be reached, which callers MUST distinguish from an empty result:
+        // "we could not read the grid" and "there are no strategies" are different claims.
+        private T WithStrategiesGrid<T>(Func<object, T> fn, List<string> notes)
+        {
+            object cc = GetControlCenter();
+            if (cc == null) { notes.Add("ControlCenter.Instance is null"); return default(T); }
+            System.Windows.Threading.Dispatcher disp = null;
+            try { disp = ((System.Windows.Threading.DispatcherObject)cc).Dispatcher; } catch (Exception ex) { notes.Add("ControlCenter dispatcher: " + ex.Message); }
+
+            Func<T> body = delegate
+            {
+                object mtc = null; int savedIdx = -1; PropertyInfo selProp = null;
+                try
+                {
+                    System.Windows.DependencyObject dep = cc as System.Windows.DependencyObject;
+                    mtc = FirstMember(cc, new[] { "MainTabControl" });
+                    if (mtc == null) { notes.Add("ControlCenter.MainTabControl did not resolve"); return default(T); }
+                    Type mt = mtc.GetType();
+                    selProp = mt.GetProperty("SelectedIndex");
+                    try { object si = FirstMember(mtc, new[] { "SelectedIndex" }); if (si is int) savedIdx = (int)si; } catch { }
+
+                    System.Windows.DependencyObject grid = dep != null ? FindDescendantByTypeName(dep, "StrategiesGrid") : null;
+                    if (grid == null)
+                    {
+                        // The tab content virtualizes while inactive, so the grid is simply not in the tree
+                        // yet. Activate tabs until it materializes — the index is NOT stable across boxes.
+                        object items = FirstMember(mtc, new[] { "Items" });
+                        int count = 0;
+                        try { PropertyInfo cp = items != null ? items.GetType().GetProperty("Count") : null; if (cp != null) count = (int)cp.GetValue(items, null); } catch { }
+                        for (int i = 0; i < count && grid == null; i++)
+                        {
+                            try { if (selProp != null) selProp.SetValue(mtc, i, null); } catch { continue; }
+                            try { ((System.Windows.UIElement)mtc).UpdateLayout(); } catch { }
+                            grid = dep != null ? FindDescendantByTypeName(dep, "StrategiesGrid") : null;
+                        }
+                    }
+                    if (grid == null) { notes.Add("StrategiesGrid not found after activating every Control Center tab"); return default(T); }
+                    return fn(grid);
+                }
+                catch (Exception ex) { notes.Add("grid: " + ex.Message); return default(T); }
+                finally
+                {
+                    try { if (mtc != null && selProp != null && savedIdx >= 0) { selProp.SetValue(mtc, savedIdx, null); ((System.Windows.UIElement)mtc).UpdateLayout(); } }
+                    catch (Exception ex) { notes.Add("restoring the Control Center tab: " + ex.Message); }
+                }
+            };
+
+            // BOUNDED wait. `body` activates tabs and calls UpdateLayout, so on a saturated UI dispatcher an
+            // untimed Invoke blocks this poller thread indefinitely and the whole bridge stops answering.
+            // Losing one grid read costs this request; losing the poller costs every other command.
+            try
+            {
+                if (disp != null && !disp.CheckAccess())
+                    return disp.Invoke(body, System.Windows.Threading.DispatcherPriority.Normal, CancellationToken.None,
+                                       TimeSpan.FromSeconds(GridInvokeTimeoutSeconds));
+                return body();
+            }
+            catch (TimeoutException)
+            {
+                notes.Add("the Control Center UI dispatcher did not respond within " + (int)GridInvokeTimeoutSeconds + "s (saturated)");
+                return default(T);
+            }
+            catch (Exception ex) { notes.Add("grid dispatch: " + ex.Message); return default(T); }
+        }
+
+        // ⚠ The name a row is ADDRESSED by. `Name` is legitimately blank on some strategies (a tool that
+        // hides its on-chart label does it by blanking Name), so both the snapshot and the checkbox lookup
+        // must fall back to the type name — and to the SAME thing. When only one of them did, every
+        // blank-named strategy listed fine and then failed to enable with "could not identify the Enabled
+        // checkbox", because the row it was matching against reported "".
+        private static string StrategyDisplayName(object strat)
+        {
+            if (strat == null) return null;
+            string nm = null;
+            try { nm = FirstMember(strat, new[] { "Name" }) as string; } catch { }
+            return string.IsNullOrEmpty(nm) ? SafeTypeName(strat) : nm;
+        }
+
+        // Grid rows come off `source`; each entry carries .Strategy (a live StrategyBase) and .IsEnabled.
+        private List<StratRow> SnapshotGrid(object grid)
+        {
+            var outp = new List<StratRow>();
+            object rows = FirstMember(grid, new[] { "source", "Entries", "ItemsSource" });
+            if (!(rows is IEnumerable)) return outp;
+            foreach (object entry in (IEnumerable)rows)
+            {
+                if (entry == null) continue;
+                try
+                {
+                    object strat = FirstMember(entry, new[] { "Strategy" });
+                    object en = FirstMember(entry, new[] { "IsEnabled" });
+                    object acct = strat != null ? FirstMember(strat, new[] { "Account" }) : null;
+                    object instr = strat != null ? FirstMember(strat, new[] { "Instrument" }) : null;
+                    object st = strat != null ? FirstMember(strat, new[] { "State" }) : null;
+                    outp.Add(new StratRow
+                    {
+                        Name = StrategyDisplayName(strat),
+                        Type = SafeTypeName(strat),
+                        Enabled = en is bool && (bool)en,
+                        State = st != null ? Convert.ToString(st) : null,
+                        Account = acct != null ? Convert.ToString(FirstMember(acct, new[] { "Name" }) ?? Convert.ToString(acct)) : null,
+                        Instrument = instr != null ? Convert.ToString(FirstMember(instr, new[] { "FullName" }) ?? Convert.ToString(instr)) : null,
+                    });
+                }
+                catch (Exception ex) { LogSafe("SnapshotGrid row: " + ex.Message); }
+            }
+            return outp;
+        }
+
+        private static void CollectToggleButtons(System.Windows.DependencyObject root, List<System.Windows.Controls.Primitives.ToggleButton> outp)
+        {
+            if (root == null) return;
+            try
+            {
+                int n = System.Windows.Media.VisualTreeHelper.GetChildrenCount(root);
+                for (int i = 0; i < n; i++)
+                {
+                    System.Windows.DependencyObject c = System.Windows.Media.VisualTreeHelper.GetChild(root, i);
+                    var tb = c as System.Windows.Controls.Primitives.ToggleButton;
+                    if (tb != null) outp.Add(tb);
+                    CollectToggleButtons(c, outp);
+                }
+            }
+            catch { }
+        }
+
+        // Walk up from a checkbox to the first DataContext that names a strategy. The grid is an
+        // Infragistics XamDataGrid, so a checkbox's DataContext is a cell/record wrapper — the entry is
+        // reached through .DataItem, not directly.
+        private static string RowNameOf(System.Windows.DependencyObject el)
+        {
+            try
+            {
+                System.Windows.DependencyObject cur = el;
+                for (int hop = 0; hop < 14 && cur != null; hop++)
+                {
+                    var fe = cur as System.Windows.FrameworkElement;
+                    if (fe != null && fe.DataContext != null)
+                    {
+                        object dc = fe.DataContext;
+                        object s = FirstMember(dc, new[] { "Strategy" });
+                        if (s == null)
+                        {
+                            object di = FirstMember(dc, new[] { "DataItem" });
+                            if (di != null) s = FirstMember(di, new[] { "Strategy" });
+                        }
+                        if (s != null)
+                        {
+                            string nm = StrategyDisplayName(s);
+                            if (!string.IsNullOrEmpty(nm)) return nm;
+                        }
+                    }
+                    cur = System.Windows.Media.VisualTreeHelper.GetParent(cur);
+                }
+            }
+            catch { }
+            return "";
+        }
+
+        // Click the row's real Enabled checkbox. See the header: this is the ONLY path that actually starts
+        // (or stops) the strategy — IsEnabled and the routed commands both flip state without it.
+        private bool ClickEnabledCheckbox(object grid, string name, bool wantEnabled, List<string> notes)
+        {
+            bool cur = false; bool found = false;
+            foreach (StratRow r in SnapshotGrid(grid))
+                if (string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)) { cur = r.Enabled; found = true; break; }
+            if (!found) { notes.Add("'" + name + "': row vanished from the grid before the click"); return false; }
+            if (cur == wantEnabled) return true;
+
+            var boxes = new List<System.Windows.Controls.Primitives.ToggleButton>();
+            CollectToggleButtons(grid as System.Windows.DependencyObject, boxes);
+            var matches = new List<System.Windows.Controls.Primitives.ToggleButton>();
+            foreach (var b in boxes)
+            {
+                string bn = ""; try { bn = b.Name; } catch { }
+                if (bn == "ExpansionIndicator") continue;   // the tree expander, not the Enabled column
+                if (string.Equals(RowNameOf(b), name, StringComparison.OrdinalIgnoreCase)) matches.Add(b);
+            }
+            // The Enabled checkbox mirrors the current state, which is what tells it apart from any other
+            // toggle that happens to sit on the row.
+            System.Windows.Controls.Primitives.ToggleButton pick = null;
+            foreach (var b in matches)
+            {
+                bool? ck = null; try { ck = b.IsChecked; } catch { }
+                if (ck.HasValue && ck.Value == cur) { pick = b; break; }
+            }
+            if (pick == null && matches.Count == 1) pick = matches[0];
+            if (pick == null)
+            {
+                notes.Add("'" + name + "': could not identify the Enabled checkbox (" + boxes.Count + " toggles in the grid, " + matches.Count + " on this row)");
+                return false;
+            }
+            try
+            {
+                MethodInfo onClick = typeof(System.Windows.Controls.Primitives.ButtonBase)
+                    .GetMethod("OnClick", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (onClick == null) { notes.Add("ButtonBase.OnClick is not reachable on this .NET build"); return false; }
+                onClick.Invoke(pick, null);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                notes.Add("'" + name + "' click: " + (ex.InnerException != null ? ex.InnerException.GetType().Name + " " + ex.InnerException.Message : ex.Message));
+                return false;
+            }
         }
 
         private string RunCompile(string id)

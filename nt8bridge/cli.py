@@ -19,6 +19,7 @@ from nt8bridge import playback as ntplayback
 from nt8bridge import screenshot as ntscreenshot
 from nt8bridge import ntstatus as ntntstatus
 from nt8bridge import workspace as ntworkspace
+from nt8bridge import strategies as ntstrategies
 from nt8bridge import reconnect as ntreconnect
 from nt8bridge import connwatch as ntconnwatch
 from nt8bridge import compile as ntcompile
@@ -71,6 +72,7 @@ Commands:
   python -m nt8bridge playback                   replay transport: clock, MOVING?, speed, .nrd coverage
   python -m nt8bridge ntstatus                   is NT running the code on disk? (catches a stale DLL)
   python -m nt8bridge workspace                  charts + indicators + strategies AND their enabled state
+  python -m nt8bridge strategies                 Control Center strategies: are they enabled? --enable to fix
   python -m nt8bridge screenshot --title Conductor   capture a window as PNG (see the screen, don't relay it)
   python -m nt8bridge reconnect --name X         reconnect a dropped connection
   python -m nt8bridge connwatch --name X         auto-reconnect inadvertent drops (loop)
@@ -617,6 +619,62 @@ def _workspace(strategy: str | None, timeout: float) -> int:
     return rc
 
 
+def _strategies(args) -> int:
+    """Exit codes carry the answer so a script does not have to parse stdout:
+
+      0  did what was asked (and, for an enable, `state` confirms it)
+      1  could not reach the grid, or the AddOn errored
+      2  the request was not fully carried out — refused by the exposure guard, not in the grid, or
+         enabled without `state` reaching Realtime before the settle expired
+
+    2 is deliberately not 0. "Clicked, but cannot yet show it running" is a different report from
+    "running", and an unattended caller that treats them alike is how a box ends up believed healthy.
+
+    Asking to enable something that is already running is NOT a 2 — see `unsatisfied_skips`. Callers
+    of this shape are usually idempotent ("make sure X is on"), and failing their no-op is useless.
+    """
+    enable = args.enable or []
+    disable = args.disable or []
+    try:
+        payload = ntstrategies.run_strategies(
+            enable=enable, disable=disable, dry_run=args.dry_run,
+            force=args.force, settle_ms=args.settle_ms, timeout=args.timeout,
+        )
+    except TimeoutError as e:
+        print(json.dumps({"command": "strategies", "status": "timeout", "ok": False, "message": str(e)}, indent=2))
+        return 1
+
+    state = ntstrategies.parse_strategies_response(payload)
+    out = {"command": "strategies"}
+    out.update(payload)
+
+    if args.strategy:
+        matches = state.find(args.strategy)
+        out["strategyQuery"] = args.strategy
+        out["strategyMatches"] = matches
+        out["strategyRunning"] = any(m.get("state") in ntstrategies.LIVE_STATES for m in matches)
+
+    unverified = state.unverified()
+    if unverified:
+        out["unverified"] = unverified
+        out["unverifiedHint"] = (
+            "clicked, but `state` had not reached Realtime when the settle expired — re-run "
+            "`strategies` to re-read rather than clicking again"
+        )
+    unsatisfied = state.unsatisfied_skips()
+    if unsatisfied:
+        out["unsatisfied"] = unsatisfied
+    print(json.dumps(out, indent=2))
+
+    if not state.ok or not state.grid_resolved:
+        return 1
+    if args.strategy and not out.get("strategyRunning"):
+        return 2
+    if unsatisfied or unverified:
+        return 2
+    return 0
+
+
 def _screenshot(title: str | None, hwnd: int | None, out: str | None, timeout: float) -> int:
     try:
         payload = ntscreenshot.run_screenshot(title, hwnd, out, timeout=timeout)
@@ -847,6 +905,22 @@ def main(argv: list[str]) -> int:
     p_ws = sub.add_parser("workspace", help="charts, indicators, strategies + enabled state")
     p_ws.add_argument("--strategy", help="assert a strategy matching this fragment is enabled (exit 2 if not)")
     p_ws.add_argument("--timeout", type=float, default=30.0)
+    p_strat = sub.add_parser(
+        "strategies",
+        help="Control Center strategies: read enabled state, or turn them on/off (--enable/--disable)")
+    p_strat.add_argument("--enable", action="append", metavar="NAME",
+                         help="enable this strategy by EXACT grid name; repeatable")
+    p_strat.add_argument("--disable", action="append", metavar="NAME",
+                         help="disable this strategy by EXACT grid name; repeatable. Does NOT flatten")
+    p_strat.add_argument("--force", action="store_true",
+                         help="--disable even when the account has a position or working orders on the instrument")
+    p_strat.add_argument("--dry-run", action="store_true",
+                         help="report what would be clicked, click nothing")
+    p_strat.add_argument("--settle-ms", type=int, default=3000,
+                         help="wait this long after clicking before re-reading `state` (default 3000, max 30000)")
+    p_strat.add_argument("--strategy", metavar="FRAGMENT",
+                         help="assert a strategy matching this fragment has state=Realtime (exit 2 if not)")
+    p_strat.add_argument("--timeout", type=float, default=60.0)
     p_recon = sub.add_parser("reconnect")
     p_recon.add_argument("--name", required=True, help="connection name to reconnect (REQUIRED)")
     p_recon.add_argument("--timeout", type=float, default=30.0)
@@ -966,6 +1040,8 @@ def main(argv: list[str]) -> int:
         return _screenshot(args.title, args.hwnd, args.out, args.timeout)
     if args.command == "workspace":
         return _workspace(args.strategy, args.timeout)
+    if args.command == "strategies":
+        return _strategies(args)
     if args.command == "reconnect":
         return _reconnect(args.name, args.timeout)
     if args.command == "connwatch":
