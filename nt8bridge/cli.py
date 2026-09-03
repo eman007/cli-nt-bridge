@@ -11,6 +11,7 @@ from nt8bridge import backtest as ntbacktest
 from nt8bridge import peek as ntpeek
 from nt8bridge import probe as ntprobe
 from nt8bridge import configure as ntconfigure
+from nt8bridge import satemplate as ntsatemplate
 from nt8bridge import batch as ntbatch
 from nt8bridge import flatten as ntflatten
 from nt8bridge import watch as ntwatch
@@ -61,6 +62,7 @@ Commands:
   python -m nt8bridge peek                       read latest SA result + param read-back (no run)
   python -m nt8bridge probe                      dump tab/tabStrategyProperties/template props (discover names)
   python -m nt8bridge configure --config c.json  set instrument/dates/bar type/fill/params on the SA tab
+  python -m nt8bridge satemplate --template X.xml  put a NinjaTrader strategy template on the SA tab
   python -m nt8bridge chartseries --instrument 'MES 09-26' --bars-type Minute --bars-value 5  change a LIVE chart's data series
   python -m nt8bridge histdump --instrument 'MNQ*' --out ./out/PARQUET  offline .nrd -> L1/L2 UTC parquet (default, no NinjaTrader; --nt8 for legacy CSV)
   python -m nt8bridge histget  --instrument 'MNQ 09-26' --from 20260706 --to 20260709  download missing MarketReplay .nrd (RequestMarketReplay per date)
@@ -69,7 +71,8 @@ Commands:
   python -m nt8bridge feedhealth --instrument 'MNQ 09-26' last-tick age (detect FROZEN feed)
   python -m nt8bridge feedwatch  --instrument 'MNQ 09-26' alert on a frozen-but-connected feed (loop)
   python -m nt8bridge connections                read connection status (live/dropped)
-  python -m nt8bridge playback                   replay transport: clock, MOVING?, speed, .nrd coverage
+  python -m nt8bridge playback [--coverage | --instrument 'MNQ 09-26']  replay transport: clock, MOVING?, speed; .nrd coverage only on request (--coverage = every instrument, minutes; --instrument = that one)
+  python -m nt8bridge playbackrun --strategy EmptyStrategy --instrument 'MNQ 09-26' --from 2026-08-10 --to 2026-08-10  playback run: connect, attach, arm, play to the data end, tear down; ONE JSON verdict
   python -m nt8bridge ntstatus                   is NT running the code on disk? (catches a stale DLL)
   python -m nt8bridge workspace                  charts + indicators + strategies AND their enabled state
   python -m nt8bridge strategies                 Control Center strategies: are they enabled? --enable to fix
@@ -151,6 +154,120 @@ def _deploy(strategy: str, kind: str) -> int:
         )
     )
     return 0
+
+
+def _playbackrun_date(value: str) -> str:
+    """argparse `type=` for playbackrun --from/--to: the driver's own check,
+    so this parser refuses exactly what the driver would refuse - and does it
+    before the driver process exists. Measured 2026-09-01: seven runs carried
+    `--to 2026-13-07` into NinjaTrader and each ended, 45-58 s of wall clock later, with
+    "FormatException: String was not recognized as a valid DateTime."
+
+    The import is deferred to this call on purpose. Measured 2026-09-02:
+    importing the driver module reconfigures sys.stdout to UTF-8 (cp1252
+    before, utf-8 after, with stdout redirected to a file), and an import at
+    the top of this module would hand that to every command. From here it
+    reaches only the playbackrun path, whose driver child prints UTF-8 anyway.
+    """
+    from nt8bridge import playback_run as ntplaybackrun
+    return ntplaybackrun.iso_date(value)
+
+
+def _playbackrun(args) -> int:
+    """Playback run: drive nt8bridge/playback_run.py.
+
+    The driver does the work and archives everything; this wrapper's job is the
+    CONTRACT: one JSON object on stdout, exit 0 only for a run that reached the
+    data end (NowEst at ToEst - the sole good exit) AND restored the baseline.
+    When the driver dies without writing a result, the tail of its transcript
+    becomes the error - a caller must never have to open files to learn what
+    went wrong.
+    """
+    import subprocess
+    import tempfile
+    # The driver is a sibling module, but it runs as its own PROCESS on purpose:
+    # it writes a transcript and a result file, and when it dies the tail of that
+    # transcript is the only thing that says why. An import would put that failure
+    # inside this process, where a caller sees a traceback instead of a verdict.
+    driver = os.path.join(os.path.dirname(os.path.abspath(__file__)), "playback_run.py")
+    if not os.path.isfile(driver):
+        print(json.dumps({"command": "playbackrun", "ok": False, "rc": 1,
+                          "error": "driver not found: %s" % driver}, indent=2))
+        return 1
+    tmp = tempfile.mkdtemp(prefix="nt8_playbackrun_")
+    res_path = os.path.join(tmp, "result.json")
+    log_path = os.path.join(tmp, "transcript.log")
+    cmd = [sys.executable, "-u", driver,
+           "--name", args.name or ("PB_" + args.strategy),
+           "--source", args.source,
+           "--tick-replay", args.tickreplay,
+           "--strategy", args.strategy,
+           "--instrument", args.instrument,
+           "--bars-type", args.barsperiod,
+           "--bars-value", str(args.barvalue),
+           "--from", args.from_,
+           "--to", args.to_,
+           "--max-wait", str(args.maxwait),
+           "--setup", "template",
+           "--log", log_path,
+           "--result", res_path]
+    if args.template:
+        cmd += ["--template", args.template]
+    # Both forwarded only when given: without them the driver sends an empty
+    # account, and the AddOn fills in the playback account NinjaTrader names
+    # itself. Passing a literal here would put the default in two places.
+    if getattr(args, "account", None):
+        cmd += ["--account", args.account]
+    # The driver has had this knob all along; it was simply not reachable from
+    # here, so a run through the bridge was stuck with the built-in 10 s / 25 s.
+    # Measured 2026-08-26: a playback connect took 25,040 ms against the 25 s the
+    # connect stage allows - short by 40 ms, and the whole batch stopped at
+    # its first test with "Status=Connecting after 25040 ms (caller allowed 24 s)".
+    # A budget that cannot be raised is a budget that decides the outcome.
+    if getattr(args, "stage_wait", None):
+        cmd += ["--stage-wait", str(args.stage_wait)]
+
+    if args.nt8_dir:
+        cmd += ["--nt8-dir", args.nt8_dir]
+    # The driver prints UTF-8 markers; without this the child would fall back
+    # to the locale codepage and crash on the first one.
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    # No timeout here: the driver bounds every wait itself (per-stage budgets
+    # and the --max-wait play budget). A second deadline on top would be a guess.
+    #
+    # stdout is NOT captured: the driver's console view (one line per phase,
+    # progress, the bot's output window, the closing result JSON) streams
+    # straight through to the user's console - the user watches
+    # the run live (established 2026-08-21). The machine contract moves with it:
+    # the result JSON is the LAST block the driver prints, and the full debug
+    # transcript is in log_path.
+    proc = subprocess.run(cmd, env=env)
+    if os.path.isfile(res_path):
+        try:
+            with open(res_path, encoding="utf-8") as fh:
+                result = json.load(fh)
+        except Exception as ex:  # noqa: BLE001 - the caller still gets a verdict
+            print(json.dumps({"command": "playbackrun", "ok": False,
+                              "rc": proc.returncode or 1,
+                              "error": "result file unreadable: %s" % ex},
+                             indent=2, ensure_ascii=False))
+            return proc.returncode or 1
+        # The driver already printed the result JSON as its closing block -
+        # printing it again would put two JSON objects on stdout.
+        return 0 if result.get("ok") else int(result.get("rc") or 1)
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            tail = fh.read().splitlines()[-30:]
+    except OSError:
+        tail = []
+    print(json.dumps({
+        "command": "playbackrun", "ok": False, "rc": proc.returncode or 1,
+        "error": "the driver ended without writing a result - the transcript "
+                 "tail carries the reason",
+        "transcript": log_path,
+        "transcriptTail": tail,
+    }, indent=2, ensure_ascii=False))
+    return proc.returncode or 1
 
 
 def _compile(type_name: str, timeout: float) -> int:
@@ -309,11 +426,18 @@ def _restart(task: str, exe: str, wait: float, stop_timeout: float) -> int:
 
 
 def _backtest(config_path: str, timeout: float, pdf=None) -> int:
-    try:
-        cfg = ntconfig.load_config(config_path)
-    except ntconfig.ConfigError as e:
-        print(json.dumps({"command": "backtest", "ok": False, "error": str(e)}, indent=2))
-        return 1
+    # No config: run the tab as it stands. The AddOn only injects params when the
+    # request carries some, so an empty one is a plain Run - the case a preceding
+    # `satemplate` sets up, where the template already holds instrument, window
+    # and parameters and repeating them here would be the drift it removes.
+    if config_path is None:
+        cfg = {}
+    else:
+        try:
+            cfg = ntconfig.load_config(config_path)
+        except ntconfig.ConfigError as e:
+            print(json.dumps({"command": "backtest", "ok": False, "error": str(e)}, indent=2))
+            return 1
     try:
         payload = ntbacktest.run_backtest(cfg, timeout=timeout)
     except TimeoutError as e:
@@ -441,6 +565,19 @@ def _configure(config_path: str, timeout: float) -> int:
     return 0 if payload.get("status") == "ok" else 1
 
 
+def _satemplate(template: str, timeout: float) -> int:
+    try:
+        payload = ntsatemplate.run_satemplate(template, timeout=timeout)
+    except TimeoutError as e:
+        print(json.dumps({"command": "satemplate", "status": "timeout", "ok": False,
+                          "message": str(e)}, indent=2))
+        return 1
+    out = {"command": "satemplate"}
+    out.update(payload)
+    print(json.dumps(out, indent=2))
+    return 0 if payload.get("status") == "ok" else 1
+
+
 def _chartseries(args) -> int:
     try:
         payload = ntchartseries.run_chartseries(
@@ -549,9 +686,16 @@ def _connections(timeout: float) -> int:
     return 0 if payload.get("status") == "ok" else 1
 
 
-def _playback(instrument: str | None, timeout: float, require_ready: bool) -> int:
+def _playback(instrument: str | None, coverage: bool, timeout: float, require_ready: bool) -> int:
+    # --require-ready asserts "connected, loaded and PARKED". "Loaded" is a question about the
+    # store, and since the coverage scan became opt-in a request without --coverage or
+    # --instrument does not ask it: the verdict would read "coverage not scanned" and the
+    # assertion could never pass. So the assertion implies the scan - of the one instrument
+    # named, else of every instrument - while the plain report stays scan-free.
+    if require_ready and not instrument:
+        coverage = True
     try:
-        payload = ntplayback.run_playback(instrument, timeout=timeout)
+        payload = ntplayback.run_playback(instrument, coverage, timeout=timeout)
     except TimeoutError as e:
         print(json.dumps({"command": "playback", "status": "timeout", "ok": False, "message": str(e)}, indent=2))
         return 1
@@ -853,9 +997,51 @@ def main(argv: list[str]) -> int:
                        help="seconds to wait for NT to stop before giving up (it will NOT launch a "
                             "second instance if the stop fails)")
     p_bt = sub.add_parser("backtest")
-    p_bt.add_argument("--config", required=True)
+    p_bt.add_argument("--config", default=None,
+                      help="config.json with the run and its params. Optional: without "
+                           "it the tab is run exactly as it stands, which is what a "
+                           "preceding `satemplate` leaves behind - the template already "
+                           "carries instrument, window and every parameter, and "
+                           "restating them here is the drift it exists to remove.")
     p_bt.add_argument("--timeout", type=float, default=120.0)
     p_bt.add_argument("--pdf", nargs="?", const="report.pdf", default=None)
+    p_pr = sub.add_parser(
+        "playbackrun",
+        help="run a strategy through the Playback connection without a click: "
+             "connect, attach, arm, play to the data end, tear down. Prints ONE "
+             "JSON result; ok only if NowEst reached ToEst AND the baseline was "
+             "restored. Failures name the stage, the sub-step and NinjaTrader's "
+             "own detail line.")
+    p_pr.add_argument("--strategy", required=True, help="strategy class name, e.g. EmptyStrategy")
+    p_pr.add_argument("--instrument", required=True, help="e.g. 'MNQ 09-26'")
+    p_pr.add_argument("--source", choices=["historical", "marketreplay"], default="historical")
+    p_pr.add_argument("--tick-replay", dest="tickreplay", choices=["true", "false"], default="false")
+    p_pr.add_argument("--bars-type", dest="barsperiod", choices=["Tick", "Minute", "Wave"], default="Tick")
+    p_pr.add_argument("--bars-value", dest="barvalue", default="1")
+    # type=: a malformed date is refused here, with the accepted form and the
+    # value, before the driver process exists - see _playbackrun_date.
+    p_pr.add_argument("--from", dest="from_", required=True, type=_playbackrun_date,
+                      help="range start EST, YYYY-MM-DD")
+    p_pr.add_argument("--to", dest="to_", required=True, type=_playbackrun_date,
+                      help="range end EST, YYYY-MM-DD, inclusive; the same day as "
+                           "--from or later")
+    p_pr.add_argument("--account", default=None,
+                      help="account to run on; default is the playback account "
+                           "NinjaTrader names itself. An unknown name stops the run.")
+    p_pr.add_argument("--stage-wait", dest="stage_wait", type=int, default=None,
+                      help="seconds one ordinary stage may take; the connect and "
+                           "Reset stages get 2.5x that. Defaults to the driver's "
+                           "10 / 25. Raise it on a box where NinjaTrader is slow "
+                           "to reach its provider - a connect that misses the "
+                           "budget stops the run, and 25 s is not much when "
+                           "another connection is already up.")
+    p_pr.add_argument("--template", default=None, help="strategy template name (default: bot defaults)")
+    p_pr.add_argument("--name", default=None, help="archive name (default: PB_<strategy>)")
+    p_pr.add_argument("--max-wait", dest="maxwait", type=int, default=40,
+                      help="play-loop budget in rounds of 30 s on the range end")
+    p_pr.add_argument("--nt8-dir", dest="nt8_dir", default=None,
+                      help="NinjaTrader data directory this run talks to. Give "
+                           "each run its own to keep several apart.")
     p_acct = sub.add_parser("account")
     p_acct.add_argument("--name", default="", help="account name filter, e.g. Sim101 (empty = all)")
     p_acct.add_argument("--timeout", type=float, default=15.0)
@@ -879,6 +1065,14 @@ def main(argv: list[str]) -> int:
     p_conf = sub.add_parser("configure")
     p_conf.add_argument("--config", required=True, help="config.json with params to apply to the SA tab")
     p_conf.add_argument("--timeout", type=float, default=30.0)
+    p_satpl = sub.add_parser("satemplate")
+    p_satpl.add_argument("--template", required=True,
+                         help="strategy template: a full path to the .xml, or a bare "
+                              "name looked up in the strategy's own template folder. "
+                              "When it belongs to a different strategy than the tab "
+                              "holds, the strategy is selected first - the other order "
+                              "silently discards the template.")
+    p_satpl.add_argument("--timeout", type=float, default=30.0)
     p_flat = sub.add_parser("flatten")
     p_flat.add_argument("--name", required=True, help="account to flatten, e.g. Sim101 (REQUIRED)")
     p_flat.add_argument("--instrument", default="", help="limit to one instrument, e.g. 'MNQ 06-26' (empty = all)")
@@ -890,10 +1084,18 @@ def main(argv: list[str]) -> int:
     p_watch.add_argument("--once", action="store_true", help="single scan (no loop) — for testing")
     p_conns = sub.add_parser("connections")
     p_conns.add_argument("--timeout", type=float, default=15.0)
-    p_pb = sub.add_parser("playback", help="replay transport state: clock, MOVING?, speed, .nrd coverage")
-    p_pb.add_argument("--instrument", help="limit .nrd coverage to one instrument (default: all)")
+    p_pb = sub.add_parser("playback", help="replay transport state: clock, MOVING?, speed, "
+                                           ".nrd coverage on request (--coverage or --instrument)")
+    p_pb.add_argument("--instrument", help="scan .nrd coverage for this one instrument only")
+    p_pb.add_argument("--coverage", action="store_true",
+                      help="scan .nrd coverage for EVERY instrument. Costly: the wide scan reads "
+                           "every .nrd on disk and holds the AddOn's poller for minutes "
+                           "(measured 2026-08-19: 3-7 min, 35 instruments). Without --coverage "
+                           "or --instrument the store is not scanned and coverageScanned is false")
     p_pb.add_argument("--require-ready", action="store_true",
-                      help="exit 2 unless the transport is connected, loaded and PARKED (for bake scripts)")
+                      help="exit 2 unless the transport is connected, loaded and PARKED (for bake "
+                           "scripts). Implies the coverage scan: of --instrument when given, else "
+                           "of every instrument")
     p_pb.add_argument("--timeout", type=float, default=30.0)
     p_nts = sub.add_parser("ntstatus", help="is NT running the code on disk? exit 2 if the DLL is newer")
     p_nts.add_argument("--timeout", type=float, default=15.0)
@@ -1010,6 +1212,14 @@ def main(argv: list[str]) -> int:
         return _regions(args.root, args.strip, args.all_files)
     if args.command == "restart":
         return _restart(args.task, args.exe, args.wait, args.stop_timeout)
+    if args.command == "playbackrun":
+        # The order check needs both dates, which `type=` sees one at a time.
+        # Same refusal as a malformed date: usage line, exit 2, no driver.
+        from nt8bridge import playback_run as ntplaybackrun  # deferred, see _playbackrun_date
+        order = ntplaybackrun.date_order_error(args.from_, args.to_)
+        if order:
+            p_pr.error(order)
+        return _playbackrun(args)
     if args.command == "backtest":
         return _backtest(args.config, args.timeout, args.pdf)
     if args.command == "account":
@@ -1026,6 +1236,8 @@ def main(argv: list[str]) -> int:
         return _probe(args.timeout)
     if args.command == "configure":
         return _configure(args.config, args.timeout)
+    if args.command == "satemplate":
+        return _satemplate(args.template, args.timeout)
     if args.command == "flatten":
         return _flatten(args.name, args.instrument, args.timeout)
     if args.command == "watch":
@@ -1033,7 +1245,7 @@ def main(argv: list[str]) -> int:
     if args.command == "connections":
         return _connections(args.timeout)
     if args.command == "playback":
-        return _playback(args.instrument, args.timeout, args.require_ready)
+        return _playback(args.instrument, args.coverage, args.timeout, args.require_ready)
     if args.command == "ntstatus":
         return _ntstatus(args.timeout)
     if args.command == "screenshot":

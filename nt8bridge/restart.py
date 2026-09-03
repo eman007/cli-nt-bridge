@@ -44,13 +44,49 @@ DEFAULT_TASK = ""
 DEFAULT_EXE = ""
 
 
-def is_running() -> bool:
+def process_listed() -> tuple[bool | None, str]:
+    """Read the process list once. Returns (listed, detail).
+
+    `listed` has THREE values, and the third is why this exists next to is_running():
+        True   tasklist lists NinjaTrader.exe
+        False  tasklist was read and does not list it
+        None   the list could NOT be read - tasklist is missing, timed out (30 s), exited non-zero
+               or printed nothing - so nothing is known about the process
+    Any NinjaTrader.exe counts: the list does not tell instances apart, so a second NinjaTrader
+    next to a dead target keeps a caller waiting instead of stopping it.
+    `detail` is what was measured, for the caller's message: the row(s) naming the process, the
+    line tasklist printed instead (locale text - "INFO: No tasks are running which match the
+    specified criteria." on an English Windows), or the failure.
+
+    Measured 2026-09-02: an unlisted name answers exit 0 plus that one line; an unknown filter
+    answers exit 1 with the error on stderr and nothing on stdout; a missing executable raises
+    FileNotFoundError and a hung one TimeoutExpired. A caller that reads every one of those as
+    "not running" passes a verdict it never measured - the preflight poll of playback_run did,
+    and ended a run after one probe with a message asserting an empty process list nobody had seen.
+    """
     try:
-        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq NinjaTrader.exe"],
-                             capture_output=True, text=True, timeout=30).stdout
-        return "NinjaTrader.exe" in out
-    except Exception:
-        return False
+        r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq NinjaTrader.exe"],
+                           capture_output=True, text=True, errors="replace", timeout=30)
+    except Exception as e:  # noqa: BLE001 - reported, not swallowed
+        return None, f"tasklist could not be run: {type(e).__name__}: {e}"
+    rows = [" ".join(ln.split()) for ln in r.stdout.splitlines() if "NinjaTrader.exe" in ln]
+    if rows:
+        return True, "tasklist lists " + "; ".join(rows)
+    text = " ".join(r.stdout.split())
+    if r.returncode == 0 and text:
+        return False, f"tasklist answered: {text}"
+    err = " ".join(r.stderr.split())
+    return None, (f"tasklist exited {r.returncode}"
+                  + (f", stdout: {text}" if text else ", printed nothing on stdout")
+                  + (f", stderr: {err}" if err else ""))
+
+
+def is_running() -> bool:
+    """True when the process list was read and lists NinjaTrader.exe; False otherwise - a list
+    that could not be read included. The callers of this bool (stop, wait_for, the restart
+    command) act the same on "not seen" and "not there"; a caller that must keep them apart
+    reads process_listed() itself (the preflight poll of playback_run does)."""
+    return process_listed()[0] is True
 
 
 def run_task(task: str) -> tuple[bool, str]:
@@ -61,7 +97,7 @@ def run_task(task: str) -> tuple[bool, str]:
         return False, "schtasks not available"
     try:
         r = subprocess.run(["schtasks", "/run", "/tn", task],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, errors="replace", timeout=60)
         ok = r.returncode == 0
         return ok, (r.stdout or r.stderr or "").strip()
     except Exception as e:  # noqa: BLE001 - reported, not swallowed
@@ -96,14 +132,14 @@ def stop(timeout: float = 60.0, force_after: float = 25.0) -> tuple[bool, str]:
         return True, "not running"
     try:
         subprocess.run(["taskkill", "/IM", "NinjaTrader.exe"],
-                       capture_output=True, text=True, timeout=30)
+                       capture_output=True, text=True, errors="replace", timeout=30)
     except Exception as e:  # noqa: BLE001 - reported, not swallowed
         return False, f"graceful close failed to dispatch: {e}"
     if wait_for(False, force_after):
         return True, "closed gracefully"
     try:
         subprocess.run(["taskkill", "/F", "/IM", "NinjaTrader.exe"],
-                       capture_output=True, text=True, timeout=30)
+                       capture_output=True, text=True, errors="replace", timeout=30)
     except Exception as e:  # noqa: BLE001
         return False, f"terminate failed to dispatch: {e}"
     remaining = max(1.0, timeout - force_after)

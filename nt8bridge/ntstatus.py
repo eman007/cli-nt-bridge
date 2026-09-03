@@ -45,6 +45,9 @@ class NtStatus:
     pid: int | None = None
     process_start: str | None = None
     dll_built: str | None = None
+    sources_newer: bool | None = None   # a .cs under bin\Custom is newer than the executing assembly
+    running_built: str | None = None    # build time of the assembly NinjaTrader executes
+    newest_source: str | None = None
 
 
 def build_ntstatus_request(request_id: str) -> dict:
@@ -77,15 +80,38 @@ def _parse(ts: str | None) -> datetime | None:
 def assess(payload: dict) -> NtStatus:
     """Turn the raw payload into the one judgement callers actually want.
 
-    STALE means the assembly on disk was built AFTER this NinjaTrader process started, so the
-    running process cannot be executing it. That is the 33-minute-wasted-cell condition, and the
-    fix for it is a restart, not another deploy.
+    STALE means NinjaTrader is not running the NinjaScript sources on disk: a .cs under
+    bin\Custom is newer than the assembly the AddOn executes from (`sourcesNewerThanRunningCode`,
+    with `runningAssembly.builtUtc` and `newestSource` reported). When the AddOn could not read
+    one side, the older time rule applies (the DLL built after the process started) and the
+    verdict says so. That is the 33-minute-wasted-cell condition, and the fix for it is a
+    reload or a restart, not another deploy. Measured 2026-09-02/03: NinjaTrader executes a
+    reload from a temp assembly compiled once more from the sources, so neither the DLL's build
+    time nor its identity tells what runs; the time rule answered "restart it" after every
+    reload while the reloaded code was running.
     """
     if payload.get("status") != "ok":
         return NtStatus(ok=False, reason="AddOn returned status=" + str(payload.get("status")))
 
     start = _parse(payload.get("processStartUtc"))
     disk = _parse((payload.get("dllOnDisk") or {}).get("builtUtc"))
+    newer = payload.get("sourcesNewerThanRunningCode")
+    running = (payload.get("runningAssembly") or {}).get("builtUtc")
+    newest = (payload.get("newestSource") or {}).get("path")
+    if isinstance(newer, bool):
+        return NtStatus(
+            ok=True,
+            stale=newer,
+            reason=(f"a source is newer than the running code ({newest}) — NT is running older "
+                    f"code; reload or restart it" if newer
+                    else "the running code is newer than every source on disk — running current code"),
+            pid=payload.get("pid"),
+            process_start=payload.get("processStartUtc"),
+            dll_built=(payload.get("dllOnDisk") or {}).get("builtUtc"),
+            sources_newer=newer,
+            running_built=running,
+            newest_source=newest,
+        )
     if start is None or disk is None:
         return NtStatus(
             ok=True,
@@ -99,10 +125,10 @@ def assess(payload: dict) -> NtStatus:
     stale = disk > start
     mins = abs((disk - start).total_seconds()) / 60.0
     reason = (
-        f"DLL built {mins:.0f} min AFTER NT started — NT is running older code; restart it"
+        f"DLL built {mins:.0f} min AFTER NT started — NT is running older code; reload or restart it"
         if stale
         else f"NT started {mins:.0f} min after the DLL was built — running current code"
-    )
+    ) + " (time rule; the AddOn reported no source comparison)"
     return NtStatus(
         ok=True,
         stale=stale,
@@ -110,6 +136,8 @@ def assess(payload: dict) -> NtStatus:
         pid=payload.get("pid"),
         process_start=payload.get("processStartUtc"),
         dll_built=(payload.get("dllOnDisk") or {}).get("builtUtc"),
+        running_built=running,
+        newest_source=newest,
     )
 
 

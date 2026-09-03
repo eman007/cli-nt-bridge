@@ -33,7 +33,7 @@ using NinjaTrader.NinjaScript;
 
 namespace NinjaTrader.NinjaScript.AddOns
 {
-    public class NT8BridgeServer : AddOnBase
+    public partial class NT8BridgeServer : AddOnBase
     {
         private readonly object _gate = new object();
         private Timer _poller;
@@ -94,6 +94,13 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 if (_triggerDir == null) return;
+                CheckLease();
+                SubscribePlaybackEvents();
+                // Subscribe from the poller, not from the first `botout` request:
+                // a line printed BEFORE the driver first asks would otherwise be
+                // lost, and a missing line is indistinguishable from a silent bot.
+                SubscribeBotOutput();
+                PruneResults();
                 foreach (string file in Directory.GetFiles(_triggerDir, "*.json"))
                     HandleTrigger(file);
             }
@@ -134,9 +141,33 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 string text = File.ReadAllText(file);
+                DateTime writtenUtc;
+                try { writtenUtc = File.GetLastWriteTimeUtc(file); }
+                catch { writtenUtc = DateTime.UtcNow; }
                 try { File.Delete(file); } catch { }   // consume the trigger
                 id = ExtractJsonString(text, "id");
                 kind = ExtractJsonString(text, "kind");
+                NoteLease(text);      // the driver is alive - push the deadline out
+
+                // A caller that has timed out is gone; running its command now acts on
+                // a state it never saw. Measured 2026-08-19: a backlog released after
+                // 11 minutes enabled, disabled and removed a strategy in the middle of
+                // a running measurement (see the file header).
+                double ageSec = (DateTime.UtcNow - writtenUtc).TotalSeconds;
+                double ttlSec = RequestTtlSec(text);
+                if (ageSec > ttlSec)
+                {
+                    LogSafe("expired " + kind + " " + id + ": " + ageSec.ToString("0") +
+                            "s old, ttl " + ttlSec.ToString("0") + "s - NOT executed");
+                    WriteResult(ResultPrefixEx(kind, ResultPrefix(kind)) + id + ".json",
+                        "{\"id\":" + JsonStr(id) + ",\"status\":\"expired\",\"executed\":false" +
+                        ",\"ageSec\":" + ageSec.ToString("0.###", InvCi) +
+                        ",\"ttlSec\":" + ttlSec.ToString("0.###", InvCi) +
+                        ",\"errors\":[{\"code\":\"EXPIRED\",\"message\":" +
+                        JsonStr("request waited " + ageSec.ToString("0") + "s in the queue, past its " +
+                                ttlSec.ToString("0") + "s TTL; not executed") + "}]}");
+                    return;
+                }
                 if (kind == "compile")
                     WriteResult("compile_" + id + ".json", RunCompile(id));
                 else if (kind == "reload")
@@ -154,7 +185,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                 else if (kind == "reconnect")
                     WriteResult("reconnect_" + id + ".json", RunReconnect(id, ExtractJsonString(text, "connection")));
                 else if (kind == "playback")
-                    WriteResult("playback_" + id + ".json", RunPlayback(id, ExtractJsonString(text, "instrument")));
+                    WriteResult("playback_" + id + ".json", RunPlayback(id, ExtractJsonString(text, "instrument"), ExtractJsonString(text, "coverage")));
+                else if (kind == "playbackrun")
+                    WriteResult("playbackrun_" + id + ".json", RunPlaybackRun(id, text));
                 else if (kind == "ntstatus")
                     WriteResult("ntstatus_" + id + ".json", RunNtStatus(id));
                 else if (kind == "workspace")
@@ -169,6 +202,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     WriteResult("probe_" + id + ".json", RunProbe(id));
                 else if (kind == "configure")
                     WriteResult("configure_" + id + ".json", RunConfigure(id, text));
+                else if (kind == "satemplate")
+                    WriteResult("satemplate_" + id + ".json", RunSaTemplate(id, text));
                 else if (kind == "feedhealth")
                     WriteResult("feedhealth_" + id + ".json", RunFeedHealth(id, ExtractJsonString(text, "instruments")));
                 else if (kind == "performance")
@@ -191,7 +226,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 LogSafe("HandleTrigger: " + ex.Message);
                 if (id != null)
                     // route the fallback error to the file the caller polls (compile_/backtest_/account_).
-                    WriteResult(ResultPrefix(kind) + id + ".json",
+                    WriteResult(ResultPrefixEx(kind, ResultPrefix(kind)) + id + ".json",
                         "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"errors\":[{\"file\":\"\",\"line\":0," +
                         "\"code\":\"BRIDGE\",\"message\":" + JsonStr(ex.Message) + "}],\"assemblyReloaded\":false}");
             }
@@ -270,7 +305,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         //  ⭐ `movingSec` is the field this was written for. A single clock reading cannot distinguish a
         //  parked transport from a running one, and that distinction is exactly what broke Gate 3. Two
         //  samples a real gap apart can. REPORT THE OUTCOME, NOT THE INTENT.
-        private string RunPlayback(string id, string instrument)
+        private string RunPlayback(string id, string instrument, string coverageFlag)
         {
             var sb = new StringBuilder();
             try
@@ -320,8 +355,15 @@ namespace NinjaTrader.NinjaScript.AddOns
                 // Coverage — what the .nrd files actually contain, from NT's own reader. The Playback
                 // slider is NOT this: its bounds are the CONNECTION range you typed, not indexed data,
                 // and misreading it as proof of loaded data cost hours on 2026-08-02.
-                sb.Append(",\"coverage\":");
-                AppendCoverage(sb, miMinMax, instrument);
+                // Opt-in: the wide scan reads every .nrd of every instrument and holds the
+                // poller's gate for minutes (measured 2026-08-19: 3-7 min, 5 MB, 35
+                // instruments). A named instrument scans just that one (17 s).
+                bool wantCoverage = !string.IsNullOrWhiteSpace(instrument)
+                                    || string.Equals(coverageFlag, "true", StringComparison.OrdinalIgnoreCase);
+                sb.Append(",\"coverageScanned\":").Append(wantCoverage ? "true" : "false")
+                  .Append(",\"coverage\":");
+                if (wantCoverage) AppendCoverage(sb, miMinMax, instrument);
+                else sb.Append("[]");
                 sb.Append("}");
                 return sb.ToString();
             }
@@ -432,7 +474,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     {
                         loadedVer = custom.GetName().Version != null ? custom.GetName().Version.ToString() : null;
                         try { loadedPath = custom.Location; } catch { }
-                        // An in-memory (byte[]-loaded) assembly has no Location — NT swaps NinjaScript in
+                        // An in-memory (byte[]-loaded) assembly has no Location - NT swaps NinjaScript in
                         // that way on a reload, so an empty Location is INFORMATION, not an error.
                         if (!string.IsNullOrEmpty(loadedPath) && File.Exists(loadedPath))
                             loadedBuilt = File.GetLastWriteTimeUtc(loadedPath);
@@ -440,11 +482,54 @@ namespace NinjaTrader.NinjaScript.AddOns
                 }
                 catch (Exception ex) { LogSafe("ntstatus assembly: " + ex.Message); }
 
+                // The assembly THIS code executes from - the one NinjaTrader actually runs.
+                // Measured 2026-09-03: after a reload it is NOT bin\Custom\NinjaTrader.Custom.dll
+                // but a temp assembly (Documents\NinjaTrader 8\tmp\<guid>.dll) - NinjaTrader
+                // compiles the sources once more for loading - so neither the DLL's build time
+                // nor its identity says what runs. The executing file's own build time does.
+                string selfName = null, selfLoc = null;
+                DateTime? selfBuilt = null;
+                try
+                {
+                    Assembly self = typeof(NT8BridgeServer).Assembly;
+                    selfName = self.GetName().Name;
+                    try { selfLoc = self.Location; } catch { }
+                    if (!string.IsNullOrEmpty(selfLoc) && File.Exists(selfLoc))
+                        selfBuilt = File.GetLastWriteTimeUtc(selfLoc);
+                }
+                catch (Exception ex) { LogSafe("ntstatus self assembly: " + ex.Message); }
+
+                // The newest NinjaScript source under bin\Custom: a source newer than the
+                // executing assembly is code NinjaTrader has not compiled into what it runs -
+                // the 33-minute-wasted-cell condition (deployed, never rebuilt or reloaded).
+                string newestSrc = null;
+                DateTime? newestSrcUtc = null;
+                try
+                {
+                    string custDir = Path.Combine(Globals.UserDataDir, "bin", "Custom");
+                    foreach (string f in Directory.GetFiles(custDir, "*.cs", SearchOption.AllDirectories))
+                    {
+                        DateTime m = File.GetLastWriteTimeUtc(f);
+                        if (!newestSrcUtc.HasValue || m > newestSrcUtc.Value) { newestSrcUtc = m; newestSrc = f; }
+                    }
+                }
+                catch (Exception ex) { LogSafe("ntstatus sources: " + ex.Message); }
+
                 string dllOnDisk = Path.Combine(Globals.UserDataDir, "bin", "Custom", "NinjaTrader.Custom.dll");
                 DateTime? diskBuilt = File.Exists(dllOnDisk) ? (DateTime?)File.GetLastWriteTimeUtc(dllOnDisk) : null;
 
-                // The finding, stated rather than left for the reader to compute.
-                bool stale = diskBuilt.HasValue && diskBuilt.Value > procStart;
+                // The finding, stated rather than left for the reader to compute: a source on
+                // disk newer than the executing assembly means NinjaTrader is not running the
+                // code on disk. Reload or restart fixes it, another deploy does not. Measured
+                // 2026-09-02: three compile+reload rounds in one process started 16:02 - the
+                // old rule (DLL newer than the process) said "restart it" after every one of
+                // them while the reloaded code was what ran. The time rule against the process
+                // start remains the fallback when a side could not be read.
+                bool? sourcesNewer = null;
+                if (selfBuilt.HasValue && newestSrcUtc.HasValue)
+                    sourcesNewer = newestSrcUtc.Value > selfBuilt.Value;
+                bool stale = sourcesNewer.HasValue ? sourcesNewer.Value
+                             : (diskBuilt.HasValue && diskBuilt.Value > procStart);
 
                 var sb = new StringBuilder();
                 sb.Append("{\"id\":").Append(JsonStr(id))
@@ -459,6 +544,12 @@ namespace NinjaTrader.NinjaScript.AddOns
                   .Append(",\"builtUtc\":").Append(loadedBuilt.HasValue ? JsonStr(loadedBuilt.Value.ToString("o")) : "null").Append("}")
                   .Append(",\"dllOnDisk\":{\"path\":").Append(JsonStr(dllOnDisk))
                   .Append(",\"builtUtc\":").Append(diskBuilt.HasValue ? JsonStr(diskBuilt.Value.ToString("o")) : "null").Append("}")
+                  .Append(",\"runningAssembly\":{\"name\":").Append(JsonStr(selfName))
+                  .Append(",\"location\":").Append(JsonStr(selfLoc))
+                  .Append(",\"builtUtc\":").Append(selfBuilt.HasValue ? JsonStr(selfBuilt.Value.ToString("o")) : "null").Append("}")
+                  .Append(",\"newestSource\":{\"path\":").Append(JsonStr(newestSrc))
+                  .Append(",\"modifiedUtc\":").Append(newestSrcUtc.HasValue ? JsonStr(newestSrcUtc.Value.ToString("o")) : "null").Append("}")
+                  .Append(",\"sourcesNewerThanRunningCode\":").Append(sourcesNewer.HasValue ? (sourcesNewer.Value ? "true" : "false") : "null")
                   .Append(",\"assemblyOlderThanDisk\":").Append(stale ? "true" : "false")
                   .Append("}");
                 return sb.ToString();
@@ -3624,6 +3715,20 @@ namespace NinjaTrader.NinjaScript.AddOns
                 sb.Append("{\"id\":").Append(JsonStr(id))
                   .Append(",\"status\":\"ok\",\"ts\":").Append(JsonStr(DateTime.UtcNow.ToString("o")))
                   .Append(",\"connections\":[");
+                // ⚠ A CONNECTED CONNECTION MUST NEVER BE MISSING FROM THIS REPORT.
+                //
+                // The loop below walks the CONFIGURATION and looks the live status up by
+                // name. A connection that is live but has no ConnectOptions entry under
+                // that name therefore did not appear at all - and the report is used to
+                // answer "is anything else connected?", where a missing row reads as
+                // "no". Measured 2026-08-20: NinjaTrader's connection menu listed 8
+                // entries with "Live" connected; this report listed 6 without it, and a
+                // reader concluded from it that nothing was connected.
+                //
+                // Fix: after the configured rows, append every LIVE connection whose
+                // name was not already emitted. `source` says where a row came from, so
+                // a caller can tell a configured entry from one only NinjaTrader knows.
+                var emitted = new List<string>();
                 bool first = true;
                 foreach (ConnectOptions o in cfg)
                 {
@@ -3632,12 +3737,30 @@ namespace NinjaTrader.NinjaScript.AddOns
                     bool connected = liveStatus == "Connected";
                     string cls; if (!_dropClass.TryGetValue(nm, out cls)) cls = "";
                     bool inadvertent = cls == "inadvertent" && !connected;
+                    emitted.Add(nm);
                     if (!first) sb.Append(",");
                     first = false;
                     sb.Append("{\"name\":").Append(JsonStr(nm))
                       .Append(",\"status\":").Append(JsonStr(liveStatus))
                       .Append(",\"connected\":").Append(connected ? "true" : "false")
                       .Append(",\"inadvertentlyDropped\":").Append(inadvertent ? "true" : "false")
+                      .Append(",\"source\":\"configured\"")
+                      .Append("}");
+                }
+                foreach (Connection c in live)
+                {
+                    string nm = SafeStr(delegate { return c.Options == null ? "" : c.Options.Name; });
+                    if (nm.Length == 0 || emitted.Contains(nm)) continue;
+                    emitted.Add(nm);
+                    string liveStatus = SafeStr(delegate { return c.Status.ToString(); });
+                    bool connected = liveStatus == "Connected";
+                    if (!first) sb.Append(",");
+                    first = false;
+                    sb.Append("{\"name\":").Append(JsonStr(nm))
+                      .Append(",\"status\":").Append(JsonStr(liveStatus))
+                      .Append(",\"connected\":").Append(connected ? "true" : "false")
+                      .Append(",\"inadvertentlyDropped\":false")
+                      .Append(",\"source\":\"live-only\"")
                       .Append("}");
                 }
                 sb.Append("]}");

@@ -80,6 +80,7 @@ def run_precheck(strategy_path) -> list[CompileError]:
         ["powershell", "-NoProfile", "-File", str(compiler), str(path)],
         capture_output=True,
         text=True,
+        errors="replace",
         env=env,
     )
     return parse_errors(proc.stdout + "\n" + proc.stderr)

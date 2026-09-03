@@ -4,6 +4,324 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`playbackrun` opens NinjaTrader's Playback window itself (stage `openwindow`).**
+
+  Every stage that writes the panel — the source radios, the date editors, the speed,
+  the transport — looks the window up with `FindWindowByTitle("Playback")`, and nothing
+  in the run opened it. NinjaTrader does not persist that window in a workspace
+  (measured 2026-08-29 after a restart: 52 windows loaded across all 7 open workspaces,
+  none titled `Playback`), so after every NinjaTrader start the first run died at the
+  source check. Measured 2026-09-03: three attempts inside one call, each `rc 2`,
+  `3 source check: panel radios - Playback window not found`, each after a healthy
+  connect (`SLOW CONNECT: 225 s … Connected.`) — 1238 s of wall clock for no result.
+
+  The new stage runs before the source check and constructs NinjaTrader's own window
+  type on the UI thread (`NinjaTrader.Gui.Data.PlaybackControlCenter`, parameterless
+  constructor, `Show()`) — no clicks, no UI automation. It is idempotent: an existing
+  window is reported (`already open`) and never duplicated. Measured against a running
+  NinjaTrader 8.1.8.2 the same day: answered in 1.2 s with
+  `open PlaybackControlCenter ok "shown: Playback"` and `window present ok "found"`.
+
+- **`playbackrun` stage 2 (connect) gets its own budget — `CONNECT_WAIT`, min. 600 s.**
+
+  The connect shared `SLOW_WAIT` (2.5 × `--stage-wait`; 49 s at a caller's
+  `--stage-wait 20`). Measured 2026-08-28: of 23 playback connects that day, each took
+  16–30 s — and one sat silently inside `PlaybackAdapter.Connect` for 423 s (no log
+  lines, no disk reads) and then came back **Connected** and healthy. The 49 s bound
+  turned that one slow connect into an ERROR, which ended a ~29 h batch of runs that
+  stops on the first one. The stall is inside NinjaTrader's encrypted Core, so the
+  caller's budget is the only correct place: `CONNECT_WAIT = max(600, SLOW_WAIT)`,
+  and a connect slower than `SLOW_WAIT` is reported loudly
+  (`SLOW CONNECT: … s`) instead of vanishing into a green verdict.
+
+- **`playbackrun` refuses a malformed `--from`/`--to` before anything is sent to NinjaTrader.**
+
+  Both dates go through one validator in the driver (`iso_date`, the argparse `type=` of the
+  CLI's `playbackrun` subparser and of the driver's own parser, plus `date_order_error` for the
+  pair): exactly `YYYY-MM-DD`, a real calendar day, and `--to` not before `--from`.
+  `2026-13-07`, `2026-7-7`, `07/07/2026` or an end before its start are refused by the argument
+  parser — usage line on stderr, exit 2, the accepted form and the offending value in the
+  message — and no trigger file is written, no driver process started. A valid pair travels
+  unchanged: the request JSON and the archive carry the string that was typed.
+
+  Measured 2026-09-01: seven archived runs (05:16–08:23) carried `"to": "2026-13-07"`. Nothing
+  checked the value on the way in — the CLI declared both dates as plain strings and the AddOn
+  hands them to `DateTime.Parse` as they arrive — so every one of them ran stage 1a, lasted
+  45–58 s of wall clock, and died with
+  `2 connect: exception - FormatException: String was not recognized as a valid DateTime.`
+  The shape is pinned by a pattern and not by `date.fromisoformat` alone: on Python 3.11 that
+  also accepts `20260607` and `2026-W23-1`, two shapes nobody documented.
+
+- **`playbackrun --source historical` — the Historical run mode no longer dies on the panel's
+  source radios, the modal notice, or a coverage scan of the wrong store.** (AddOn
+  `NT8BridgeServerPlayback.cs`; measured 2026-08-30/31 in NinjaTrader.)
+
+  - **The source radios are DISPLAY ONLY.** Writing `rbHistoricalData.IsChecked` while the
+    connection is up threw `TargetInvocationException <- FormatException: "String was not
+    recognized as a valid DateTime"` — NinjaTrader re-parses the panel's date fields on that
+    write, the same wording as the modal `(Panic)` it raises when Playback connects without a
+    date range — and took the whole run with it (rc 2). The source itself is decided by
+    `PlaybackAdapter.IsSourceHistoricalData` at stage `3 source`; the radios only keep the
+    panel from contradicting the run. They are now written through a soft step: a refused
+    write is reported (`source radios ... panel keeps the PREVIOUS source ...`) and is never a
+    failure verdict.
+  - **The "no Level II market depth in this mode" notice is dismissed by a watcher armed BEFORE
+    the write.** Switching to Historical makes NinjaTrader raise that modal synchronously inside
+    the `IsChecked` write, so a handler placed after the write never ran (measured 2026-08-30:
+    the dialog came up unchanged). The watcher runs on its own thread, started before the
+    write, confirms through the dispatcher (which keeps pumping inside a modal's own frame),
+    identifies the dialog by its wording alone — text carrying both "Level II market depth" and
+    "Market Replay"; no other dialog is touched — ticks "Don't show this message again" and
+    invokes OK through the button's automation peer. The step `historical notice` reports the
+    outcome.
+  - **The coverage pre-flight asks the store this run reads.** Playback/Historical is served
+    from `db\tick` (NCD); only Market Replay reads `db\replay` (NRD). A Historical run on
+    `MNQ 09-26` was refused with `store scan unavailable, panel range used / requested
+    28.08.2026..28.08.2026 inside it: False` while that day held 24 Ask / 24 Bid / 23 Last NCD
+    files: the instrument has no `.nrd` at all (the recordings live under the continuous name
+    `MNQ ##-##`), so the `db\replay` scan could only return nothing, and the fallback then
+    judged the request against the PREVIOUS run's panel range (27.08.). New `TickCoverage`
+    scans `db\tick\<instrument>\*.ncd` when the trigger's `source` is `historical` — the day is
+    taken from the first 8 name characters, deliberately a pre-flight ("is there anything for
+    that day"); the content is decided when the series loads and a run with missing data still
+    fails loudly there. The step text says `NCD files` vs `files readable` accordingly.
+  - **`SetElementValue` reports the cause, not only the symptom.** A `TargetInvocationException`
+    carries only "the callee threw"; the step text now unwraps `InnerException` up to three
+    levels (`... <- FormatException: ...`). Dropping it had left the log naming a symptom with
+    no cause (measured 2026-08-30 on `rbHistoricalData.IsChecked`).
+
+- **`playbackrun` stage 0 (preflight) waits for a busy NinjaTrader instead of failing —
+  `PREFLIGHT_WAIT`, min. 1800 s — and refuses at once when there is no `NinjaTrader.exe` process.**
+
+  The preflight asked ONE `transport` question with a 20 s TTL and, on silence, aborted with
+  `preflight: the bridge did not answer` (rc 2, nothing started) and the advice to clear the
+  trigger folder and restart NinjaTrader. Seven archived runs ended that way between
+  2026-08-29 and 2026-09-02 (`NT8Bridge/runs/*/result.json`, every one with
+  `wallClockSeconds` 88.3–88.4). For the last of them NinjaTrader's own log shows what it was
+  doing: a Playback connect from 05:15:46 to 05:22:14 — 388 s — and the run's result.json is
+  stamped 05:20:59, inside that window. The AddOn's poller handles one trigger at a time on one
+  timer thread (`Poll` takes a gate; a tick that finds it taken reads nothing), and
+  `Stage_Connect` runs on that thread — it calls `Connection.Connect` and waits for `Connected`
+  in a sleep loop bounded by the request budget — so until the connect returns no request of
+  any kind is read or answered. `heartbeat.json` cannot tell: `TryBeat` writes it through
+  `Globals.MainThreadDispatcher`, not from the poller thread, so a fresh beat says the UI thread
+  is alive, not that the poller is free. Holds of the same kind measured 423/437/453 s
+  (2026-08-28/29); a cold-started NinjaTrader left its own log silent for 735 s (2026-09-01).
+
+  The preflight is now a poll: it repeats the cheap probe — each with the short 20 s TTL the
+  AddOn honours (`HandleTrigger` discards a trigger older than its `ttlSec` unexecuted), and
+  each unanswered trigger taken back before the next one is written, so nothing piles up —
+  until one is answered or `PREFLIGHT_WAIT = max(1800, SLOW_WAIT)` ends: 2.4× the longest
+  measured silence (735 s) and 4.0–4.6× the measured connects (388–453 s). While it waits the
+  console says so at most every 30 s (`NinjaTrader is busy - no answer for N s, waiting up to
+  M s`), an answer after a wait is reported (`Bridge answered after N s`), and result.json
+  carries `preflightSeconds` so a slow preflight stays visible in the archive instead of hiding
+  inside `wallClockSeconds`.
+
+  One silence is not waited out: no `NinjaTrader.exe` process at all. A stale or absent
+  `heartbeat.json` cannot prove that waiting is useless — the AddOn writes the file only once it
+  has loaded, so a cold start shows the same file while the wait is exactly right — but the
+  process list can: without the process nothing could ever answer. After every unanswered probe
+  the poll therefore reads the process list once (`restart.process_listed`, one `tasklist` call,
+  measured 0.065–0.072 s) and stops on the spot when the list was read and does not name the
+  process — one probe, 26 s, what the single ask cost, instead of the budget. A list that could
+  NOT be read (tasklist missing from PATH, timed out, exit non-zero, no output; measured
+  2026-09-02) is no verdict: it is said once per distinct failure, the silence stays a wait, and
+  the budget-exhausted report calls the process UNKNOWN. The check is made only after an
+  unanswered probe, never before the first one, so a run whose first probe is answered is
+  untouched. The error string is the same in every case — callers match on `preflight: the
+  bridge did not answer` — while the explanation names the cause. The poll and the process check
+  are covered without NinjaTrader in `tests/test_playback_run_preflight.py`; `restart.is_running()`
+  is unchanged for its other callers.
+
+- **`ntstatus` decides "stale" by comparing the sources with the code NinjaTrader executes.**
+
+  The verdict compared the DLL's build time with the process start, so after every `reload` it
+  answered `DLL built N min AFTER NT started — NT is running older code; restart it` while the
+  reloaded code was exactly what ran (measured 2026-09-02: three compile+reload rounds at 19:14,
+  19:41 and 20:17 in one process started at 16:02, each followed by that verdict and by runs on
+  the new code). Two attempts were dropped on measurement: remembering the last reload's time
+  (the old code handles the reload that deploys it), and matching the DLL's ModuleVersionId
+  against the loaded assemblies (NinjaTrader executes a reload from a temp assembly,
+  `Documents\NinjaTrader 8\tmp\<guid>.dll`, compiled once more from the sources - its own
+  MVID, never the DLL's; measured 2026-09-03 05:15 via `typeof(NT8BridgeServer).Assembly`).
+
+  What answers the operator's question is the executing assembly's build time against the
+  newest `.cs` under `bin\Custom`: a source newer than the running code is code NinjaTrader has
+  not compiled into what it runs. The AddOn reports `runningAssembly` (name, location, builtUtc),
+  `newestSource` (path, modifiedUtc) and `sourcesNewerThanRunningCode`; the verdict is that
+  answer, names the newer source, and falls back to the old time rule only when a side could not
+  be read - saying so (`time rule`).
+
+- **`playbackrun` teardown: the "strategy rows" verdict measures what the removal waited for, and
+  gives the grid a moment to catch up.**
+
+  `restore` removes the strategy rows and waits until no row carries a strategy object any more
+  (`restore: strategy rows 1 -> 0 after 103 ms`), then the stage's verdict re-read the grid's raw
+  entry count and, measured 2026-09-03 06:32 on a loaded machine (twelve concurrent headless
+  NinjaTrader hosts), got `1`: the grid had not refreshed yet. That made `baselineClean` false and
+  rc 2 for a run that had reached its data end with nothing running. The verdict now counts the
+  rows carrying a strategy (the removal's own measurement), reports the raw entry count next to it,
+  and polls for up to 10 s before it judges: `1 entries, 0 with a strategy after 250 ms` is clean,
+  `1 entries, 1 with a strategy after 10000 ms` is not.
+
+- **`playbackrun` confirms NinjaTrader's order-rejection notice during a run instead of letting it
+  stack.**
+
+  `Playback101, Stop price can't be changed above the market. affected Order: Sell 1 StopMarket @
+  29861,5` is an `NTMessageBox` NinjaTrader raises when a strategy's stop modification is refused
+  because the market crossed the stop between the strategy's own side check and NinjaTrader's
+  validation. Measured 2026-09-02 (Playback/Historical, NinjaTrader log 16:55:34): seven in one run,
+  every one handled by the strategy itself (the remainder closed at market), the run reached the data
+  end - but each box stays until someone clicks OK, so an unattended run collects one per rejection,
+  and a modal holds the UI thread every later stage needs.
+
+  This is the second, and only other, exception to "a modal must never be clicked away" (the first is
+  the Historical Level II notice), and it is as narrow: the `strategystate` stage the play loop runs
+  every sample confirms only a window whose type name carries `MessageBox` AND whose text carries
+  NinjaTrader's order-rejection trailer `affected Order:` (measured wordings on 2026-09-02:
+  `Stop price can't be changed above/below the market`, `Sell/Buy stop ... can't be placed
+  above/below the market`, `Order ... can't be submitted: The OCO ID ... cannot be reused` - a match
+  on the first wording alone confirmed one of seven boxes and left six standing), invokes its OK
+  through the button's automation peer, and reports
+  `order notices: N dismissed this sample, M in this run`. The driver prints every confirmation and
+  result.json carries `orderNoticesDismissed`. Every other modal stays standing and stays the finding.
+
+  NinjaTrader opens that box without an owner: it is in neither `Globals.AllWindows` nor any
+  window's `OwnedWindows` (measured 2026-09-02 19:22-19:24: seven rejections in NinjaTrader's log,
+  three `Error` windows in the Win32 inventory, and a scan over those two lists answered
+  `0 dismissed` every sample). The stage therefore also walks `PresentationSource.CurrentSources`
+  - every WPF top-level window of the process, each read and confirmed on the dispatcher of the
+  UI thread that owns it - and reports what it saw (`windows N, message boxes M, matching K`).
+  Measured right after: one sample against three standing boxes answered `3 dismissed ...
+  (windows 10, message boxes 3, matching 3)` and the inventory went from three `Error` windows to
+  none within five seconds.
+
+### Added
+
+- **`satemplate` — ask for a backtest by template FILE instead of by parameter list.**
+
+  ```bash
+  python -m nt8bridge satemplate --template "…\VariantA.xml"
+  python -m nt8bridge backtest            # --config is now optional
+  ```
+
+  `configure` writes individual properties from a config.json. NinjaTrader's own strategy
+  templates carry the *complete* parameter set plus instrument and window, and a test suite is
+  usually one strategy class against many of them. Naming the file is shorter and cannot drift
+  from what the GUI runs, because it is what the GUI runs.
+
+  The template is **assigned**, not copied member by member: `RestoreFullStrategyTemplate`
+  already returns the strategy a file describes, and `TabStrategyProperties.StrategyTemplate`
+  takes it (`canWrite=True`, read off a running instance with `probe`). When the template names
+  a different class the class is selected **first** — writing `Strategy` installs a fresh
+  template and drops the old one silently (see `configure.py`, issue #6), so the other order
+  loses everything.
+
+  The instrument travels too. NinjaTrader does not hand it over: after assigning a template
+  naming `NQ 06-26` the strategy read `NQ 06-26` while the tab still read `ES 09-26` — and it is
+  the tab's instrument the Analyzer runs. `applied` in the response is a *reference* comparison,
+  so a property that accepts a write and keeps its own object fails instead of passing.
+
+- **`playbackrun` — one Playback measurement, end to end.**
+
+  ```bash
+  python -m nt8bridge playbackrun --strategy MyBot --instrument "MNQ 09-26" --source marketreplay --tick-replay false --bars-type Minute --bars-value 1 --from 2026-08-10 --to 2026-08-10
+  ```
+
+  Every connection off, clean start, connect, source, dates, range, speed, attach the strategy,
+  play to the data end, restore the baseline — then one JSON verdict and an archived run
+  directory. Every value it writes is READ BACK, and it exits 0 only when the data end was
+  reached **and** the teardown restored the baseline, so a run that ended for any other reason
+  cannot be mistaken for a result. It waits on events, never on a fixed sleep: the transport is
+  confirmed by the clock moving, the data end by the clock reaching the requested end, and the
+  attach by NinjaTrader's own log entry `Enabling NinjaScript strategy`.
+
+  Adds a second AddOn file (`NT8BridgeServerPlayback.cs`) carrying the stages this needs.
+
+  - **`--account` — name the simulation account the strategy trades on.**
+
+    ```bash
+    python -m nt8bridge playbackrun --strategy MyBot --account Playback101 ...
+    ```
+
+    Without the switch the run asks NinjaTrader for its own playback account
+    (`Account.PlaybackAccountName`) instead of assuming a name. An account that does not exist
+    **stops the run** and lists the ones that do — it is never swapped for another, because a
+    strategy trading on an account nobody watches produces a run that looks successful.
+
+    Accounts separate bookkeeping, not the run's mode: `--source` and `--tick-replay` are
+    process-wide in NinjaTrader, so every bot in one pass shares them.
+
+  - **`--stage-wait` — seconds one ordinary stage may take.**
+
+    The connect and Reset stages get 2.5× that; without the switch the driver's own 10 / 25
+    apply. Raise it on a box where NinjaTrader is slow. Two stages keep their own floors on top
+    of it: the connect (`CONNECT_WAIT`, see Fixed) and the preflight (`PREFLIGHT_WAIT`).
+
+### Changed
+
+- **Every request now carries a TTL.** A trigger that has waited longer than `ttlSec` in the
+  server's queue is discarded instead of executed, and answered with `status: "expired"` and code
+  `EXPIRED`. The default is 300 s and it applies to **all** commands. Measured 2026-08-19: a
+  backlog released after 11 minutes enabled, disabled and removed a strategy in the middle of a
+  running measurement.
+
+- **`connections` says where each row came from.** A new `source` field reads `configured` for a
+  row from the connection list and `live-only` for one that is running without being in it — the
+  case that made a live connection invisible to a caller reading the configuration alone.
+
+- **`playback` — the `.nrd` coverage scan is opt-in: `--coverage` (every instrument) or
+  `--instrument X` (that one).**
+
+  ```bash
+  python -m nt8bridge playback                            # clock, MOVING?, speed — no store scan
+  python -m nt8bridge playback --instrument "MNQ 09-26"   # coverage of that one instrument
+  python -m nt8bridge playback --coverage --timeout 600   # coverage of every instrument
+  ```
+
+  The wide scan reads every `.nrd` of every instrument and holds the AddOn's poller for minutes
+  (measured 2026-08-19: 3-7 min, 5 MB, 35 instruments); a named instrument scans just that one
+  (17 s). The AddOn now scans only when the request names an instrument or carries
+  `"coverage": "true"`, and always answers `coverageScanned: true|false` before `coverage`
+  (an empty list when not scanned). The readiness verdict keeps the two apart: an unscanned
+  store reads `coverage not scanned (pass --coverage or --instrument)` instead of `no readable
+  .nrd files on disk — nothing to replay`, which was a claim about data nobody had looked at.
+  A response without the key — an AddOn built before this change always scanned — keeps its
+  old meaning. `--require-ready` implies the scan (of `--instrument` when given, else of every
+  instrument), so a bake script keeps its old meaning: connected, loaded and parked.
+
+### Fixed
+
+- **Subprocess output is decoded with `errors="replace"`.** `tasklist`, `schtasks` and `taskkill`
+  write in the console codepage, not UTF-8; on a non-English Windows the first non-ASCII byte
+  raised `UnicodeDecodeError` and took the command down with it.
+
+### Documentation
+
+- **`playbackrun` and `satemplate` added to the README's command list**, and the count in its
+  heading brought along: the list named 31 of the 33 commands (`performance` and `perfwindow`
+  had only their prose section), and now names 33 of 35.
+
+- **README: one public section "Run modes and the stores they read" replaces internal
+  test-project notes.** What backs its table is the AddOn's own code, not quoted log lines: for a
+  Historical run the coverage pre-flight scans `db\tick\<instrument>\*.ncd` (`TickCoverage`),
+  for a Market Replay run `db\replay\<instrument>\*.nrd` (`ReplayCoverage`), and `--source`
+  picks the scanner; the Strategy Analyzer has no such pre-flight and the README claims no store
+  for it. The section also documents what decides `playbackrun --source`
+  (`PlaybackAdapter.IsSourceHistoricalData`, written and read back; the panel radios are display
+  only), the store-aware pre-flight, the Level II notice the bridge dismisses without touching
+  any other dialog, and the teardown rule for a killed run (`alloff` + `restore`). A line break
+  that had cut `db\replay` in two is fixed. The command list says that `playback` scans
+  coverage only on request, and the `playbackrun` section documents the date format and the
+  preflight wait. New sections `satemplate` and `playback` (with `--require-ready` and
+  `coverageScanned`), and a flag reference for `playbackrun` (`--template`, `--name`,
+  `--stage-wait`, `--max-wait`, `--nt8-dir`); the `ntstatus` line names the rule it applies.
+
 ## [1.6.0] - 2026-08-20
 
 ### Added
