@@ -33,6 +33,7 @@ def nt8_running(process_name: str = PROCESS_NAME) -> bool:
             ["tasklist", "/FI", "IMAGENAME eq " + process_name],
             capture_output=True,
             text=True,
+            errors="replace",
         ).stdout
         return process_name.lower() in (out or "").lower()
     except OSError:
@@ -58,7 +59,8 @@ def is_hung(threshold_sec: float, now=None) -> bool:
 
 def kill_nt8(process_name: str = PROCESS_NAME) -> None:
     try:
-        subprocess.run(["taskkill", "/F", "/IM", process_name], capture_output=True, text=True)
+        subprocess.run(["taskkill", "/F", "/IM", process_name],
+                       capture_output=True, text=True, errors="replace")
     except OSError:
         pass
 

@@ -8,6 +8,7 @@ NinjaTrader, and `_restart`'s ordering is asserted here against a fake module.
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -140,6 +141,75 @@ def test_failed_start_says_nt_is_now_down(monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert rc == 1 and out["stage"] == "start"
     assert "STOPPED" in out["hint"]
+
+
+# ── process_listed: three states, and is_running() as the bool view of them ────────────────────────
+
+class _Completed:
+    """What subprocess.run returns, reduced to the three fields process_listed reads."""
+
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def _tasklist_gives(monkeypatch, outcome) -> None:
+    """subprocess.run replaced for the tasklist call: `outcome` is returned, or raised."""
+
+    def fake_run(args, **kw):
+        assert args[:2] == ["tasklist", "/FI"]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+# tasklist's own shapes, measured 2026-09-02: a listing has a header, a rule and
+# one row per process; an unlisted name answers exit 0 plus one INFO line (the
+# console's locale text); an unknown filter answers exit 1, nothing on stdout.
+ROW = ("\nImage Name                     PID Session Name        Session#    Mem Usage\n"
+       "========================= ======== ================ =========== ============\n"
+       "NinjaTrader.exe               4711 Console                    1  1,234,567 K\n")
+INFO = "INFO: No tasks are running which match the specified criteria.\n"
+
+
+def test_process_listed_true_quotes_the_row(monkeypatch):
+    _tasklist_gives(monkeypatch, _Completed(0, ROW))
+    listed, detail = restart.process_listed()
+    assert listed is True
+    assert detail == "tasklist lists NinjaTrader.exe 4711 Console 1 1,234,567 K"
+    assert restart.is_running() is True
+
+
+def test_process_listed_false_quotes_what_tasklist_answered(monkeypatch):
+    _tasklist_gives(monkeypatch, _Completed(0, INFO))
+    listed, detail = restart.process_listed()
+    assert listed is False
+    assert detail == "tasklist answered: " + INFO.strip()
+    assert restart.is_running() is False
+
+
+@pytest.mark.parametrize("outcome, said", [
+    (FileNotFoundError(2, "The system cannot find the file specified"),
+     "tasklist could not be run: FileNotFoundError: [Errno 2] The system cannot find the file "
+     "specified"),
+    (subprocess.TimeoutExpired(["tasklist"], 30),
+     "tasklist could not be run: TimeoutExpired: Command '['tasklist']' timed out after 30 seconds"),
+    (_Completed(1, "", "ERROR: The search filter cannot be recognized.\n\n"),
+     "tasklist exited 1, printed nothing on stdout, stderr: ERROR: The search filter cannot be "
+     "recognized."),
+    (_Completed(0, ""), "tasklist exited 0, printed nothing on stdout"),
+])
+def test_process_listed_none_when_the_list_could_not_be_read(monkeypatch, outcome, said):
+    """None, not False: a read that failed says nothing about the process. Before this existed,
+    every one of these read as "not running" - and the preflight poll of playbackrun ended a run
+    on it after one probe. is_running() folds None into False for the callers that act the same
+    on "not seen" and "not there"."""
+    _tasklist_gives(monkeypatch, outcome)
+    listed, detail = restart.process_listed()
+    assert listed is None
+    assert detail == said
+    assert restart.is_running() is False
 
 
 # ── deploy: a missing flag is an argparse error, not a TypeError ────────────────────────────────────

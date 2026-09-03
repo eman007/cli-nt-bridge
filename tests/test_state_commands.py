@@ -17,6 +17,18 @@ def test_playback_build_request():
     assert req["instrument"] == "NQ 06-26"
 
 
+def test_playback_request_carries_the_coverage_opt_in_only_when_asked():
+    """The wide .nrd scan is opt-in (measured 2026-08-19: 3-7 min for 35 instruments, and the
+    AddOn's poller is held for that long). The flag travels as the STRING "true" because that is
+    what the AddOn compares it to; a request without the flag must not carry the key at all."""
+    assert ntplayback.build_playback_request("id3", coverage=True) == {
+        "id": "id3", "kind": "playback", "coverage": "true"}
+    assert "coverage" not in ntplayback.build_playback_request("id4")
+    assert "coverage" not in ntplayback.build_playback_request("id5", "NQ 06-26")
+    both = ntplayback.build_playback_request("id6", "NQ 06-26", coverage=True)
+    assert both["instrument"] == "NQ 06-26" and both["coverage"] == "true"
+
+
 def _pb(**over):
     payload = {
         "status": "ok",
@@ -69,6 +81,34 @@ def test_no_readable_nrd_is_refused():
     assert "no readable" in why
 
 
+def test_unscanned_coverage_is_not_read_as_an_empty_store():
+    """A request naming neither an instrument nor the coverage opt-in comes back with
+    coverageScanned false and coverage []. Nobody looked at the store, so the verdict must say so
+    instead of "no readable .nrd" — a claim about data that was never read."""
+    st = _pb(coverageScanned=False, coverage=[])
+    assert st.coverage_scanned is False
+    ok, why = st.ready_to_seek()
+    assert ok is False
+    assert "coverage not scanned" in why
+    assert "no readable" not in why
+
+
+def test_scanned_coverage_with_data_is_ready():
+    ok, why = _pb(coverageScanned=True).ready_to_seek()
+    assert ok is True
+    assert "parked" in why
+
+
+def test_absent_coverage_scanned_key_keeps_the_old_meaning():
+    """An AddOn without the opt-in never writes coverageScanned and always scans, so its empty
+    coverage list still means 'nothing readable'."""
+    st = _pb(coverage=[])
+    assert st.coverage_scanned is True
+    ok, why = st.ready_to_seek()
+    assert ok is False
+    assert "no readable" in why
+
+
 def test_span_lookup():
     st = _pb()
     assert st.span("NQ 06-26") == ("2026-04-19T23:00:00", "2026-04-23T22:59:00")
@@ -96,6 +136,53 @@ def test_not_stale_when_the_process_started_after_the_build():
     })
     assert st.stale is False
     assert "running current code" in st.reason
+
+
+def test_not_stale_when_the_running_code_is_newer_than_every_source():
+    """Measured 2026-09-02/03: compile + reload in one process started at 16:02; the DLL on disk
+    is newer than the process every time, NinjaTrader executes a temp assembly compiled from the
+    sources, and that is what runs. Sources vs running code decides, not clocks of the process."""
+    st = ntntstatus.assess({
+        "status": "ok",
+        "processStartUtc": "2026-09-02T14:02:37Z",
+        "dllOnDisk": {"builtUtc": "2026-09-03T03:15:04Z"},
+        "runningAssembly": {"name": "0d46200ae29d4fc2b124b520081cbd4f",
+                            "location": r"C:\Users\x\Documents\NinjaTrader 8\tmp\0d46200ae29d4fc2b124b520081cbd4f.dll",
+                            "builtUtc": "2026-09-03T03:15:03Z"},
+        "newestSource": {"path": r"C:\Users\x\Documents\NinjaTrader 8\bin\Custom\AddOns\NT8BridgeServer.cs",
+                         "modifiedUtc": "2026-09-03T03:14:40Z"},
+        "sourcesNewerThanRunningCode": False,
+    })
+    assert st.stale is False
+    assert "running current code" in st.reason
+    assert st.sources_newer is False and st.running_built == "2026-09-03T03:15:03Z"
+
+
+def test_stale_when_a_source_is_newer_than_the_running_code():
+    """The 33-minute wasted cell: a source deployed after the running code was compiled."""
+    st = ntntstatus.assess({
+        "status": "ok",
+        "processStartUtc": "2026-09-02T14:02:37Z",
+        "dllOnDisk": {"builtUtc": "2026-09-03T03:15:04Z"},
+        "runningAssembly": {"builtUtc": "2026-09-03T03:15:03Z"},
+        "newestSource": {"path": r"C:\x\bin\Custom\Strategies\MyBot.cs", "modifiedUtc": "2026-09-03T03:40:00Z"},
+        "sourcesNewerThanRunningCode": True,
+    })
+    assert st.stale is True
+    assert "MyBot.cs" in st.reason and "reload or restart" in st.reason
+
+
+def test_without_a_source_comparison_the_time_rule_applies_and_says_so():
+    """An AddOn that could not read one side (or an older AddOn) reports no comparison; the
+    verdict then falls back to the clocks and names that."""
+    st = ntntstatus.assess({
+        "status": "ok",
+        "processStartUtc": "2026-09-02T14:02:37Z",
+        "dllOnDisk": {"builtUtc": "2026-09-02T18:17:37Z"},
+        "sourcesNewerThanRunningCode": None,
+    })
+    assert st.stale is True
+    assert "time rule" in st.reason
 
 
 def test_missing_timestamps_do_not_silently_pass_as_fresh():

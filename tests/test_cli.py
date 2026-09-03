@@ -312,3 +312,218 @@ def test_histdump_cli_dispatch(monkeypatch, capsys):
     assert called["instrument_glob"] == "MNQ*" and called["mode"] == "depth"
     out = json.loads(capsys.readouterr().out)
     assert out["command"] == "histdump" and out["count"] == 1
+
+
+def test_backtest_without_config_runs_the_tab_as_it_stands(monkeypatch, capsys):
+    """No --config is a plain Run, not a missing argument.
+
+    A template put on the tab by `satemplate` already carries instrument, window
+    and every parameter, so demanding them again here would reintroduce exactly
+    the restatement that naming a file removes. The AddOn injects params only
+    when the request carries some, which makes an empty config a Run and nothing
+    else.
+    """
+    seen = {}
+    monkeypatch.setattr(cli.ntbacktest, "run_backtest",
+                        lambda cfg, timeout=120.0: seen.update(cfg=cfg) or {"status": "ok"})
+    rc = cli.main(["backtest"])
+    out = json.loads(capsys.readouterr().out)
+    assert seen["cfg"] == {}
+    assert out["command"] == "backtest" and rc == 0
+
+
+def test_backtest_with_a_bad_config_still_refuses(monkeypatch, capsys):
+    """Optional is not ignored: a config that IS given is still validated."""
+    def boom(_path):
+        raise cli.ntconfig.ConfigError("Config not found: nope.json")
+
+    monkeypatch.setattr(cli.ntconfig, "load_config", boom)
+    rc = cli.main(["backtest", "--config", "nope.json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["ok"] is False and "nope.json" in out["error"]
+
+
+def test_satemplate_forwards_the_template_and_timeout(monkeypatch, capsys):
+    seen = {}
+    monkeypatch.setattr(cli.ntsatemplate, "run_satemplate",
+                        lambda template, timeout=30.0:
+                        seen.update(template=template, timeout=timeout)
+                        or {"status": "ok", "applied": True})
+    rc = cli.main(["satemplate", "--template", r"C:\t\A.xml", "--timeout", "45"])
+    out = json.loads(capsys.readouterr().out)
+    assert seen["template"] == r"C:\t\A.xml" and seen["timeout"] == 45.0
+    assert out["command"] == "satemplate" and out["applied"] is True and rc == 0
+
+
+def test_satemplate_that_did_not_apply_is_a_failure(monkeypatch, capsys):
+    """A template the tab did not take must not exit 0.
+
+    The run afterwards would use whatever was there before, and every step would
+    report ok while the numbers belonged to another variant.
+    """
+    monkeypatch.setattr(cli.ntsatemplate, "run_satemplate",
+                        lambda template, timeout=30.0:
+                        {"status": "error", "applied": False,
+                         "error": "the tab kept its previous StrategyTemplate instance"})
+    rc = cli.main(["satemplate", "--template", "A.xml"])
+    capsys.readouterr()
+    assert rc == 1
+
+
+def _fake_playbackrun_driver(result):
+    """Stand in for the driver process, writing the result file it would write."""
+    import subprocess
+
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        path = cmd[cmd.index("--result") + 1]
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(result, fh)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    return seen, fake_run
+
+
+def test_playbackrun_cli_dispatch(monkeypatch, capsys):
+    """The wrapper's job is the argument list and the verdict, not the run itself."""
+    import subprocess
+
+    from nt8bridge import cli
+
+    seen, fake_run = _fake_playbackrun_driver({"command": "playbackrun", "ok": True, "rc": 0})
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rc = cli.main(["playbackrun", "--strategy", "MyBot", "--instrument", "NQ 06-26",
+                   "--source", "marketreplay", "--tick-replay", "false",
+                   "--bars-type", "Minute", "--bars-value", "1",
+                   "--from", "2026-08-10", "--to", "2026-08-10"])
+    capsys.readouterr()
+    assert rc == 0
+    cmd = seen["cmd"]
+    for flag, value in (("--strategy", "MyBot"), ("--instrument", "NQ 06-26"),
+                        ("--source", "marketreplay"), ("--tick-replay", "false"),
+                        ("--bars-type", "Minute"), ("--bars-value", "1"),
+                        ("--from", "2026-08-10"), ("--to", "2026-08-10")):
+        assert cmd[cmd.index(flag) + 1] == value
+    assert cmd[cmd.index("--setup") + 1] == "template"
+
+
+def test_playbackrun_that_did_not_reach_the_data_end_is_a_failure(monkeypatch, capsys):
+    """`ok: false` must not exit 0 - a run that stopped early is not a measurement."""
+    import subprocess
+
+    from nt8bridge import cli
+
+    _, fake_run = _fake_playbackrun_driver(
+        {"command": "playbackrun", "ok": False, "rc": 2, "endReason": "did-not-finish"})
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rc = cli.main(["playbackrun", "--strategy", "MyBot", "--instrument", "NQ 06-26",
+                   "--source", "historical", "--tick-replay", "true",
+                   "--bars-type", "Tick", "--bars-value", "1",
+                   "--from", "2026-08-10", "--to", "2026-08-10"])
+    capsys.readouterr()
+    assert rc == 2
+
+
+def test_playbackrun_rejects_an_unsupported_bar_type(capsys):
+    """`--bars-type Day` used to fall through to the Minute token and run silently."""
+    import pytest
+
+    with pytest.raises(SystemExit):
+        cli.main(["playbackrun", "--strategy", "MyBot", "--instrument", "NQ 06-26",
+                  "--source", "marketreplay", "--tick-replay", "false",
+                  "--bars-type", "Day", "--bars-value", "1",
+                  "--from", "2026-08-10", "--to", "2026-08-10"])
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_playbackrun_refuses_a_malformed_date_before_starting_the_driver(monkeypatch, capsys):
+    """Measured 2026-09-01: seven runs carried --to 2026-13-07 into NinjaTrader and
+    each ended 45-58 s of wall clock later with "FormatException: String was not recognized as a
+    valid DateTime." The parser refuses it here, and the driver never starts."""
+    import subprocess
+
+    import pytest
+
+    seen, fake_run = _fake_playbackrun_driver({"command": "playbackrun", "ok": True, "rc": 0})
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    for bad in ("2026-13-07", "07/07/2026", "2026-7-7"):
+        with pytest.raises(SystemExit) as ex:
+            cli.main(["playbackrun", "--strategy", "MyBot", "--instrument", "NQ 06-26",
+                      "--from", "2026-06-07", "--to", bad])
+        err = capsys.readouterr().err
+        assert ex.value.code == 2
+        assert bad in err and "YYYY-MM-DD" in err
+    assert "cmd" not in seen            # no driver process, hence no request
+
+
+def test_playbackrun_refuses_an_end_before_the_start(monkeypatch, capsys):
+    """Both dates well-formed, the pair unusable: the same refusal, the same silence."""
+    import subprocess
+
+    import pytest
+
+    seen, fake_run = _fake_playbackrun_driver({"command": "playbackrun", "ok": True, "rc": 0})
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(SystemExit) as ex:
+        cli.main(["playbackrun", "--strategy", "MyBot", "--instrument", "NQ 06-26",
+                  "--from", "2026-06-07", "--to", "2026-06-01"])
+    err = capsys.readouterr().err
+    assert ex.value.code == 2
+    assert "--to 2026-06-01" in err and "--from 2026-06-07" in err
+    assert "cmd" not in seen
+
+
+def test_playbackrun_forwards_a_valid_pair_unchanged(monkeypatch, capsys):
+    """type= returns the string it was given, so the driver sees what was typed;
+    the same day at both ends is a one-day run, not a refusal."""
+    import subprocess
+
+    seen, fake_run = _fake_playbackrun_driver({"command": "playbackrun", "ok": True, "rc": 0})
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rc = cli.main(["playbackrun", "--strategy", "MyBot", "--instrument", "NQ 06-26",
+                   "--from", "2026-06-07", "--to", "2026-06-07"])
+    capsys.readouterr()
+    assert rc == 0
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--from") + 1] == "2026-06-07"
+    assert cmd[cmd.index("--to") + 1] == "2026-06-07"
+
+
+def test_playbackrun_passes_account_and_stage_wait_to_the_driver(monkeypatch, capsys):
+    """--account and --stage-wait are the driver's; the wrapper only has to hand them over."""
+    import subprocess
+
+    from nt8bridge import cli
+
+    seen, fake_run = _fake_playbackrun_driver({"command": "playbackrun", "ok": True, "rc": 0})
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rc = cli.main(["playbackrun", "--strategy", "MyBot", "--instrument", "NQ 06-26",
+                   "--source", "marketreplay", "--tick-replay", "false",
+                   "--bars-type", "Minute", "--bars-value", "1",
+                   "--from", "2026-08-10", "--to", "2026-08-10",
+                   "--account", "Playback101", "--stage-wait", "20"])
+    capsys.readouterr()
+    assert rc == 0
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--account") + 1] == "Playback101"
+    assert cmd[cmd.index("--stage-wait") + 1] == "20"
+
+
+def test_playbackrun_without_account_and_stage_wait_sends_neither(monkeypatch, capsys):
+    """Absent switches must stay absent: the driver's own defaults decide, not a wrapper value."""
+    import subprocess
+
+    from nt8bridge import cli
+
+    seen, fake_run = _fake_playbackrun_driver({"command": "playbackrun", "ok": True, "rc": 0})
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rc = cli.main(["playbackrun", "--strategy", "MyBot", "--instrument", "NQ 06-26",
+                   "--source", "marketreplay", "--tick-replay", "false",
+                   "--bars-type", "Minute", "--bars-value", "1",
+                   "--from", "2026-08-10", "--to", "2026-08-10"])
+    capsys.readouterr()
+    assert rc == 0
+    assert "--account" not in seen["cmd"]
+    assert "--stage-wait" not in seen["cmd"]
