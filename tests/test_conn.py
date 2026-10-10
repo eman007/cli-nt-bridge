@@ -19,14 +19,14 @@ def test_parse_and_inadvertently_dropped_filters_user_parked():
     state = ntconnections.parse_connections_response({
         "status": "ok",
         "connections": [
-            {"name": "Tradovate-Demo", "status": "ConnectionLost", "connected": False, "inadvertentlyDropped": True},
+            {"name": "Broker-Demo", "status": "ConnectionLost", "connected": False, "inadvertentlyDropped": True},
             {"name": "Tradovate-Live", "status": "Disconnected", "connected": False, "inadvertentlyDropped": False},
             {"name": "Kinetick", "status": "Connected", "connected": True, "inadvertentlyDropped": False},
         ],
     })
     assert state.ok is True
     # only the inadvertent drop; the user-parked + the connected one are excluded
-    assert {c["name"] for c in state.inadvertently_dropped()} == {"Tradovate-Demo"}
+    assert {c["name"] for c in state.inadvertently_dropped()} == {"Broker-Demo"}
     assert state.connection("Kinetick")["connected"] is True
     assert state.connection("nope") is None
 
@@ -57,8 +57,8 @@ def test_run_connections_writes_trigger_and_reads_result(monkeypatch, tmp_path):
 # ---- reconnect action ----
 
 def test_reconnect_build_request():
-    req = ntreconnect.build_reconnect_request("id1", "Tradovate-Demo")
-    assert req["kind"] == "reconnect" and req["connection"] == "Tradovate-Demo"
+    req = ntreconnect.build_reconnect_request("id1", "Broker-Demo")
+    assert req["kind"] == "reconnect" and req["connection"] == "Broker-Demo"
 
 
 def test_reconnect_requires_name():
@@ -72,8 +72,8 @@ def test_run_reconnect_writes_trigger_and_reads_result(monkeypatch, tmp_path):
     monkeypatch.setattr(ntreconnect, "new_request_id", lambda: "rc1")
     trigger, result = ntio.ensure_bridge_dirs()
     ntio.atomic_write_json(result / "reconnect_rc1.json",
-                           {"id": "rc1", "status": "ok", "name": "Tradovate-Demo", "statusAfter": "Connected"})
-    payload = ntreconnect.run_reconnect("Tradovate-Demo", timeout=1.0)
+                           {"id": "rc1", "status": "ok", "name": "Broker-Demo", "statusAfter": "Connected"})
+    payload = ntreconnect.run_reconnect("Broker-Demo", timeout=1.0)
     assert payload["status"] == "ok" and payload["statusAfter"] == "Connected"
 
 
@@ -89,12 +89,12 @@ def test_user_parked_connection_never_reconnected():
     state = ntconnections.parse_connections_response({
         "status": "ok",
         "connections": [
-            {"name": "Tradovate-Demo", "status": "Disconnected", "connected": False, "inadvertentlyDropped": False},
+            {"name": "Broker-Demo", "status": "Disconnected", "connected": False, "inadvertentlyDropped": False},
         ],
     })
     calls = []
     events = connwatch.watch(
-        ["Tradovate-Demo"], grace_seconds=0.0, max_iterations=3,
+        ["Broker-Demo"], grace_seconds=0.0, max_iterations=3,
         _scan=lambda allow: state.inadvertently_dropped(allow),
         _reconnect=lambda name: calls.append(name) or {"statusAfter": "Connected"},
         _sleep=lambda s: None, _now=lambda: 0.0, _log=lambda e: None,
@@ -103,17 +103,17 @@ def test_user_parked_connection_never_reconnected():
 
 
 def test_inadvertent_within_grace_then_reconnected_after_grace():
-    flagged = [{"name": "Tradovate-Demo", "inadvertentlyDropped": True}]
+    flagged = [{"name": "Broker-Demo", "inadvertentlyDropped": True}]
     calls = []
     # iter1 -> now 0 (sets timer, within grace, no action); iter2 -> now 25 (past 20s grace -> reconnect)
     times = [0.0, 25.0]
     events = connwatch.watch(
-        ["Tradovate-Demo"], grace_seconds=20.0, max_iterations=2,
+        ["Broker-Demo"], grace_seconds=20.0, max_iterations=2,
         _scan=lambda allow: flagged,
         _reconnect=lambda name: (calls.append(name) or {"status": "ok", "statusAfter": "Connected"}),
         _sleep=lambda s: None, _now=lambda: (times.pop(0) if times else 25.0), _log=lambda e: None,
     )
-    assert calls == ["Tradovate-Demo"]
+    assert calls == ["Broker-Demo"]
     assert len(events) == 1 and events[0]["went_green"] is True
     assert events[0]["reason"] == "inadvertent drop past grace period"
 
@@ -209,7 +209,7 @@ def test_cli_reconnect_requires_name():
 def test_cli_connwatch_once(monkeypatch, capsys):
     monkeypatch.setattr(cli.ntconnwatch, "watch",
                         lambda names, **kw: [{"connection": names[0], "went_green": True}])
-    rc = cli.main(["connwatch", "--name", "Tradovate-Demo", "--once"])
+    rc = cli.main(["connwatch", "--name", "Broker-Demo", "--once"])
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0 and payload["command"] == "connwatch"
-    assert payload["connections"] == ["Tradovate-Demo"]
+    assert payload["connections"] == ["Broker-Demo"]

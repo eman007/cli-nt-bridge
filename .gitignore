@@ -9,3 +9,13 @@ __pycache__/
 
 # run transcripts written by playbackrun
 logs/
+
+# NT8 Guard: the release build's work folders, and the setup guide's rendered PDF, Quick Start and screenshots
+guard/build/out/
+guard/build/cache/
+guard/build/stage/
+guard/build/release/
+!guard/docs/guide/*.pdf
+!guard/docs/guide/*.png
+!guard/docs/guide/shots/
+!guard/docs/guide/shots/*.png

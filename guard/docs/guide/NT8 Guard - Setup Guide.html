@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NT8 Guard Setup Guide</title>
+<style>
+/* The control panel's own type, shipped with Guard (IBM Plex, SIL OFL 1.1) - no network needed to render. */
+@font-face { font-family: "IBM Plex Sans"; font-weight: 400; src: local("IBM Plex Sans"), url("../../app/panel/fonts/IBMPlexSans-Regular.ttf"); }
+@font-face { font-family: "IBM Plex Sans"; font-weight: 500; src: local("IBM Plex Sans Medium"), url("../../app/panel/fonts/IBMPlexSans-Medium.ttf"); }
+@font-face { font-family: "IBM Plex Sans"; font-weight: 600; src: local("IBM Plex Sans SemiBold"), url("../../app/panel/fonts/IBMPlexSans-SemiBold.ttf"); }
+@font-face { font-family: "IBM Plex Sans Condensed"; font-weight: 600 700; src: local("IBM Plex Sans Condensed SemiBold"), url("../../app/panel/fonts/IBMPlexSansCondensed-SemiBold.ttf"); }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 400 600; src: local("IBM Plex Mono"), url("../../app/panel/fonts/IBMPlexMono-Regular.ttf"); }
+:root {
+  --bg: #0b0c0f; --surface: #121418; --surface-2: #181b21; --line: #262a32;
+  --fg: #c3c7cf; --fg-strong: #eceef2; --muted: #858c98; --accent: #9eaccb; --accent-ink: #0b0c0f;
+  --live: #5fb47c; --warn: #d0a453; --danger: #d7726f;
+  --live-soft: rgba(95, 180, 124, .12); --warn-soft: rgba(208, 164, 83, .12); --danger-soft: rgba(215, 114, 111, .12);
+  --code-bg: #0f1114;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Segoe UI", sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", Consolas, "Cascadia Mono", monospace;
+  --step--1: .8125rem; --step-0: 1rem; --step-1: 1.1875rem; --step-2: 1.5rem; --step-3: 2.25rem;
+  --step-4: clamp(2.25rem, 5vw, 3.25rem);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: var(--step-0); line-height: 1.6; -webkit-font-smoothing: antialiased; }
+a { color: var(--accent); text-underline-offset: 3px; }
+a:hover { color: var(--fg-strong); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+strong { color: var(--fg-strong); font-weight: 600; }
+code { font-family: var(--font-mono); font-size: .875em; background: var(--surface-2); border: 1px solid var(--line); border-radius: 4px; padding: .05em .35em; color: var(--fg-strong); overflow-wrap: anywhere; }
+.label { font-family: var(--font-mono); font-size: .6875rem; font-weight: 600; letter-spacing: .32em; text-transform: uppercase; color: var(--accent); }
+
+.masthead { border-bottom: 1px solid var(--line); background: var(--surface); }
+.masthead-inner { max-width: 1180px; margin: 0 auto; padding-inline: 24px; padding-block: 44px 36px; display: grid; gap: 28px; grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.brand { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+.pill { display: inline-flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: .6875rem; font-weight: 600; letter-spacing: .12em; color: var(--live); background: var(--live-soft); border: 1px solid rgba(95, 180, 124, .45); border-radius: 999px; padding: 3px 10px; }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--live); }
+h1 { font-family: var(--font-display); font-weight: 700; font-size: var(--step-4); line-height: 1.02; color: var(--fg-strong); margin: 0 0 14px; letter-spacing: -.01em; }
+.lede { max-width: 60ch; margin: 0; color: var(--fg); font-size: var(--step-1); line-height: 1.5; }
+.spec { display: grid; gap: 6px; font-family: var(--font-mono); font-size: var(--step--1); color: var(--muted); text-align: right; }
+.spec b { color: var(--fg-strong); font-weight: 500; }
+
+.frame { max-width: 1180px; margin: 0 auto; padding-inline: 24px; padding-block: 40px 80px; display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 56px; }
+.toc { position: sticky; top: 24px; align-self: start; }
+.toc ol { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 2px; }
+.toc a { display: flex; gap: 10px; padding: 6px 10px; border-radius: 6px; text-decoration: none; color: var(--muted); font-size: .875rem; line-height: 1.35; }
+.toc a span { font-family: var(--font-mono); font-size: .75rem; color: var(--accent); min-width: 1.4em; padding-top: 1px; }
+.toc a:hover { background: var(--surface-2); color: var(--fg-strong); }
+.toc .sep { margin: 12px 0 4px; padding-left: 10px; }
+
+main { min-width: 0; max-width: 780px; }
+section { padding-block: 8px 44px; border-bottom: 1px solid var(--line); margin-bottom: 44px; scroll-margin-top: 24px; }
+section:last-child { border-bottom: 0; margin-bottom: 0; }
+.sec-head { display: grid; gap: 8px; margin-bottom: 20px; }
+h2 { font-family: var(--font-display); font-weight: 600; font-size: var(--step-3); line-height: 1.1; color: var(--fg-strong); margin: 0; }
+h3 { font-family: var(--font-display); font-weight: 600; font-size: var(--step-1); color: var(--fg-strong); margin: 30px 0 10px; }
+p { margin: 0 0 14px; max-width: 68ch; }
+ul, ol.list { margin: 0 0 16px; padding-left: 1.25em; display: grid; gap: 8px; max-width: 68ch; }
+li::marker { color: var(--accent); }
+
+.flow { display: flex; flex-wrap: wrap; align-items: stretch; margin: 24px 0 22px; }
+.node { flex: 1 1 150px; min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 14px 12px; display: grid; gap: 4px; align-content: start; }
+.node .label { font-size: .625rem; letter-spacing: .24em; }
+.node b { font-family: var(--font-display); font-size: 1.0625rem; color: var(--fg-strong); font-weight: 600; line-height: 1.2; }
+.node small { font-family: var(--font-mono); color: var(--muted); font-size: .75rem; line-height: 1.4; }
+.node.core { border-color: rgba(95, 180, 124, .55); background: rgba(95, 180, 124, .07); }
+.arrow { flex: 0 0 34px; display: grid; place-items: center; }
+.arrow svg { width: 22px; height: 12px; }
+.arrow path { stroke: var(--accent); fill: none; stroke-width: 1.6; }
+
+.modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
+.mode { border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; background: var(--surface); display: grid; gap: 6px; align-content: start; }
+.mode .label { color: var(--muted); letter-spacing: .2em; }
+.mode b { font-family: var(--font-display); color: var(--fg-strong); font-size: 1.0625rem; font-weight: 600; }
+.mode p { margin: 0; font-size: .9rem; }
+.mode.pick { border-color: var(--accent); }
+.mode.pick .label { color: var(--accent); }
+
+.note { border-left: 3px solid var(--accent); background: var(--surface); padding: 12px 16px; border-radius: 0 6px 6px 0; margin: 18px 0; max-width: 68ch; }
+.note p:last-child { margin-bottom: 0; }
+.note.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+.note.danger { border-left-color: var(--danger); background: var(--danger-soft); }
+.note .label { display: block; margin-bottom: 4px; letter-spacing: .24em; }
+.note.warn .label { color: var(--warn); }
+.note.danger .label { color: var(--danger); }
+.note ul { margin: 6px 0 0; gap: 5px; }
+
+.steps { list-style: none; counter-reset: step; margin: 0 0 16px; padding: 0; display: grid; gap: 14px; max-width: 68ch; }
+.steps > li { counter-increment: step; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 12px; }
+.steps > li::before { content: counter(step); font-family: var(--font-mono); font-size: .8125rem; font-weight: 600; color: var(--accent); border: 1px solid var(--line); border-radius: 6px; height: 26px; display: grid; place-items: center; background: var(--surface); }
+.steps > li > div { min-width: 0; }
+.steps p { margin: 0 0 8px; }
+
+.table-wrap { overflow-x: auto; margin: 16px 0 22px; border: 1px solid var(--line); border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; font-size: .9rem; min-width: 520px; }
+th { text-align: left; font-family: var(--font-mono); font-size: .6875rem; font-weight: 600; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); background: var(--surface); }
+th, td { padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td:first-child { color: var(--fg-strong); }
+td.nw { white-space: nowrap; }
+
+.code { margin: 14px 0 20px; min-width: 0; }
+.code pre { margin: 0; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; font-family: var(--font-mono); font-size: .8125rem; line-height: 1.6; color: var(--fg-strong); }
+
+figure.shot { margin: 18px 0 26px; }
+figure.shot img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; }
+figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-size: .75rem; color: var(--muted); }
+
+.foot { margin-top: 12px; color: var(--muted); font-size: .8125rem; font-family: var(--font-mono); }
+
+@media (max-width: 900px) {
+  .frame { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .toc { position: static; border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: var(--surface); }
+  .toc ol { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .masthead-inner { grid-template-columns: minmax(0, 1fr); }
+  .spec { text-align: left; }
+}
+@media (max-width: 640px) {
+  .masthead-inner, .frame { padding-inline: 16px; }
+  .modes { grid-template-columns: minmax(0, 1fr); }
+  .flow { flex-direction: column; }
+  .node { flex: 0 0 auto; }
+  .arrow { flex: 0 0 26px; transform: rotate(90deg); }
+  .toc ol { grid-template-columns: minmax(0, 1fr); }
+  h2 { font-size: 1.875rem; }
+}
+@media print {
+  .toc { display: none; }
+  .frame { grid-template-columns: minmax(0, 1fr); padding-block: 24px; }
+  main { max-width: none; }
+  section { break-inside: auto; }
+  .code, .note, .mode, .node, figure.shot { break-inside: avoid; }
+  .table-wrap { overflow: visible; }
+  tr { break-inside: avoid; }
+  h2, h3 { break-after: avoid; }
+  body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html, body { background: var(--bg) !important; }
+  .masthead-inner, .frame { padding-inline: 44px; }
+  .foot { display: none; }
+}
+@page { margin: 12mm 0; background: #0b0c0f; }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <div>
+      <div class="brand"><span class="label">NT8 Guard</span><span class="pill">BETA · v0.9.0</span></div>
+      <h1>NT8 Guard<br>Setup Guide</h1>
+      <p class="lede">Keeps NinjaTrader 8 running on its own: starts it again and logs in when it closes or crashes, restarts it when it freezes, brings a dead market-data feed back, puts back strategies NinjaTrader dropped - and tells your phone what it did.</p>
+    </div>
+    <div class="spec">
+      <span>Platform <b>NinjaTrader 8.1</b></span>
+      <span>Windows <b>10 / 11, no admin rights</b></span>
+      <span>Setup time <b>≈ 30 min</b></span>
+    </div>
+  </div>
+</header>
+
+<div class="frame">
+  <nav class="toc" aria-label="Contents">
+    <div class="label">Contents</div>
+    <ol>
+      <li><a href="#how"><span>—</span>How it works</a></li>
+      <li><a href="#requirements"><span>—</span>Requirements</a></li>
+      <li class="sep label">Setup</li>
+      <li><a href="#install"><span>1</span>Install</a></li>
+      <li><a href="#wizard"><span>2</span>The setup wizard</a></li>
+      <li><a href="#drill"><span>3</span>The fire drill</a></li>
+      <li class="sep label">Using it</li>
+      <li><a href="#panel"><span>—</span>The control panel</a></li>
+      <li><a href="#when"><span>—</span>What happens when…</a></li>
+      <li><a href="#pause"><span>—</span>Pausing</a></li>
+      <li><a href="#update"><span>—</span>Updating</a></li>
+      <li><a href="#uninstall"><span>—</span>Uninstalling</a></li>
+      <li class="sep label">Reference</li>
+      <li><a href="#troubleshooting"><span>—</span>Troubleshooting</a></li>
+      <li><a href="#limits"><span>—</span>Known limits</a></li>
+      <li><a href="#privacy"><span>—</span>Privacy</a></li>
+      <li><a href="#files"><span>—</span>Files &amp; settings</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <div class="note warn"><span class="label">Beta</span>
+      <p>This is the first public version. It runs on the author's own trading desk, but a first install by someone new on a clean PC is exactly what this release is for. If anything in this guide does not match what you see, please report it (see <a href="#troubleshooting">Troubleshooting</a>).</p>
+    </div>
+
+    <!-- HOW IT WORKS -->
+    <section id="how">
+      <div class="sec-head"><span class="label">Overview</span><h2>How it works</h2></div>
+      <div class="flow" role="img" aria-label="Two add-ons inside NinjaTrader report every few seconds; Guard's watchdogs on Windows read those reports, act, and alert your phone">
+        <div class="node"><span class="label">Inside NinjaTrader</span><b>Two add-ons</b><small>feed guard · NT8 link</small></div>
+        <div class="arrow" aria-hidden="true"><svg viewBox="0 0 22 12"><path d="M0 6h20M15 1l5 5-5 5"/></svg></div>
+        <div class="node core"><span class="label">On Windows</span><b>Guard's watchdogs</b><small>relauncher · overwatch · log keeper</small></div>
+        <div class="arrow" aria-hidden="true"><svg viewBox="0 0 22 12"><path d="M0 6h20M15 1l5 5-5 5"/></svg></div>
+        <div class="node"><span class="label">You</span><b>Control panel</b><small>Start menu: NT8 Guard</small></div>
+        <div class="arrow" aria-hidden="true"><svg viewBox="0 0 22 12"><path d="M0 6h20M15 1l5 5-5 5"/></svg></div>
+        <div class="node"><span class="label">Alerts</span><b>Your phone</b><small>ntfy app</small></div>
+      </div>
+      <ul>
+        <li><strong>The feed guard</strong> (an add-on inside NinjaTrader) watches the market data of a few instruments you choose. When a connection drops it reconnects it; when the data goes silent while the market is open it re-subscribes, then disconnects and reconnects the connection serving it - but never while that account holds a position.</li>
+        <li><strong>The NT8 link</strong> (the second add-on) answers Guard's questions: which connections and strategies are on, and whether you are flat.</li>
+        <li><strong>The relauncher</strong> starts NinjaTrader within a minute when it is not running, and logs in with your saved password.</li>
+        <li><strong>The overwatch</strong> checks every minute that NinjaTrader is alive - its window answers, both add-ons report, prices arrive - and restarts it when it is not. After any restart it reconnects what was connected. It also saves every strategy's settings every 30 minutes.</li>
+        <li><strong>Strategy backups:</strong> NinjaTrader drops switched-off strategies from its Strategies list when it closes. Guard puts them back from those backups - on their charts - before it starts NinjaTrader again.</li>
+        <li><strong>Everything runs under your own Windows user</strong> as scheduled tasks: no administrator rights, nothing installed for other users. The control panel only shows and changes settings; closing it changes nothing.</li>
+      </ul>
+      <h3>Three ways to run it</h3>
+      <div class="modes">
+        <div class="mode"><span class="label">Watch only</span><b>Alerts, no action</b><p>Guard watches and tells you. It never starts, restarts or reconnects anything.</p></div>
+        <div class="mode pick"><span class="label">Recover NT8 · default</span><b>Bring it all back</b><p>NinjaTrader, its connections and its strategies list come back. Switching strategies on stays with you.</p></div>
+        <div class="mode"><span class="label">Hands-off</span><b>Recover, then trade on</b><p>Everything Recover does, plus switching strategies back on and closing an unprotected position first.</p></div>
+      </div>
+    </section>
+
+    <!-- REQUIREMENTS -->
+    <section id="requirements">
+      <div class="sec-head"><span class="label">Before you start</span><h2>Requirements</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>What</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td class="nw">Windows 10 or 11</td><td>Your normal user account. No administrator rights needed.</td></tr>
+            <tr><td class="nw">NinjaTrader 8.1</td><td>Tested with 8.1.6.3 and 8.1.8.3. Older 8.1 versions should work (the wizard shows them amber); 8.0 is not supported.</td></tr>
+            <tr><td class="nw">Remember username</td><td>Tick it once in NinjaTrader's login window. Guard enters only the password.</td></tr>
+            <tr><td class="nw">A phone with ntfy</td><td>Optional but recommended: the free <strong>ntfy</strong> app (Android, iPhone) receives Guard's alerts. No account needed.</td></tr>
+            <tr><td class="nw">Being flat</td><td>Importing the add-ons makes NinjaTrader compile NinjaScript, which restarts running strategies. Do setup with no open position.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Guard brings its own Python for the strategy backups (inside its folder; nothing is installed system-wide). You do not need Python.</p>
+      <div class="note warn"><span class="label">Already running a watchdog?</span><p>If something else already restarts NinjaTrader on this PC (your own scripts, an older relauncher, cli-nt-bridge's <code>watchdog</code>), the wizard lists it in red and will not switch Guard on until you disable it: two watchdogs would each restart NinjaTrader and fight over it.</p></div>
+    </section>
+
+    <!-- 1 INSTALL -->
+    <section id="install">
+      <div class="sec-head"><span class="label">Step 1</span><h2>Install</h2></div>
+      <ol class="steps">
+        <li><div><p>Download <code>NT8Guard-v0.9.0.zip</code>, right-click it and choose <strong>Extract All…</strong>. Running <code>Install.cmd</code> from inside the zip does not work (it says so).</p></div></li>
+        <li><div><p>Double-click <strong>Install.cmd</strong> in the extracted folder. Windows may ask whether to run it, because it came from the internet: choose <strong>Run</strong> (or <strong>More info → Run anyway</strong>).</p></div></li>
+        <li><div><p>It copies Guard into <code>%LOCALAPPDATA%\NT8Guard</code>, adds <strong>NT8 Guard</strong> to the Start menu, and opens the setup wizard. Nothing runs in the background yet: that starts at the wizard's last step.</p></div></li>
+      </ol>
+      <div class="code"><pre>  NT8 Guard 0.9.0
+  app\ installed
+  python\ installed
+  the NinjaTrader add-ons zip and the guide copied
+  Start menu: NT8 Guard
+
+  Installed in C:\Users\someone\AppData\Local\NT8Guard
+  Opening the setup wizard.</pre></div>
+    </section>
+
+    <!-- 2 WIZARD -->
+    <section id="wizard">
+      <div class="sec-head"><span class="label">Step 2</span><h2>The setup wizard</h2></div>
+      <p>Seven steps. <strong>Finish later</strong> keeps your place; the wizard reopens at the same step from the Start menu, and any step can be revisited later from <strong>Tools → Setup</strong>.</p>
+
+      <h3>1 · Check this PC</h3>
+      <p>Guard looks at NinjaTrader's version and folder, its own Python, display scaling, whether Windows signs in by itself after a restart, and whether another watchdog is already switched on. <strong>Red needs fixing</strong> before Guard can do its job; <strong>amber</strong> is worth knowing.</p>
+      <figure class="shot"><img src="shots/Wizard-1.png" alt="Setup step 1: Check this PC, every row green"><figcaption>Step 1 - every row green. "Windows signs in by itself" amber only means NinjaTrader starts after you sign in to Windows.</figcaption></figure>
+
+      <h3>2 · NinjaTrader login</h3>
+      <ol class="steps">
+        <li><div><p>In NinjaTrader's login window, tick <strong>Remember username</strong> once.</p></div></li>
+        <li><div><p>Keep <strong>Guard's own login (recommended)</strong> - it finds the password box by what it is, not where it sits on the screen - or choose <strong>My own login program</strong> if you already use one, and press <strong>Save</strong>.</p></div></li>
+        <li><div><p>Type your NinjaTrader password and press <strong>Save password</strong>. It goes from the box straight into a file encrypted for <strong>this Windows user on this PC</strong> - never shown, never logged.</p></div></li>
+        <li><div><p>Optional: <strong>Test login</strong> closes NinjaTrader (only when you are flat), starts it and logs in the way Guard will after a crash.</p></div></li>
+      </ol>
+      <figure class="shot"><img src="shots/Wizard-2.png" alt="Setup step 2: NinjaTrader login"><figcaption>Step 2 - before the password is saved. Test login is further down the page.</figcaption></figure>
+
+      <h3>3 · NinjaTrader add-ons</h3>
+      <ol class="steps">
+        <li><div><p>Be flat. In NinjaTrader: <strong>Tools → Import → NinjaScript Add-On…</strong> and choose <code>NT8Guard-AddOns.zip</code> (the wizard shows where it is, with <strong>Show the file</strong> and <strong>Copy its path</strong>).</p></div></li>
+        <li><div><p>NinjaTrader compiles the two add-ons. Within a minute both lights turn green; <strong>Next</strong> waits for them.</p></div></li>
+      </ol>
+      <figure class="shot"><img src="shots/Wizard-3.png" alt="Setup step 3: both add-ons reporting"><figcaption>Step 3 - both add-ons reporting from NinjaTrader.</figcaption></figure>
+      <div class="note"><p>Already using cli-nt-bridge? Its NT8 link add-on is the same one; this import replaces it with the version Guard ships. A light that stays grey: open <strong>New → NinjaScript Editor</strong> and press <strong>F5</strong>, then check NinjaTrader's Log tab for a compile error.</p></div>
+
+      <h3>4 · Watch list</h3>
+      <p>The instruments the feed guard watches for live prices - by default <code>ES ##-##</code> and <code>NQ ##-##</code> (the <code>##-##</code> follows NinjaTrader's own contract rollover). Pick instruments your data connection always streams - a silent one reads as a dead feed. <strong>Silent after</strong> is how long a silence counts as a dead feed while the market is open (75 seconds by default). CME holidays and early closes are built in; add your own closed days if you need them.</p>
+      <figure class="shot"><img src="shots/Wizard-4.png" alt="Setup step 4: the watch list"><figcaption>Step 4 - what the feed guard made of the list: current contracts, the connection serving them, the next closure.</figcaption></figure>
+
+      <h3>5 · Phone alerts</h3>
+      <ol class="steps">
+        <li><div><p>Install the <strong>ntfy</strong> app on your phone.</p></div></li>
+        <li><div><p>Guard already made a long random <strong>private topic</strong> for you. Press <strong>Show code</strong> and scan the QR code with the phone's camera or the ntfy app to subscribe (or <strong>Copy address</strong> and add it in the app).</p></div></li>
+        <li><div><p><strong>Next</strong> saves it. The last step sends a test alert; <strong>Send a test</strong> on the Alerts tab or in Tools sends one any time.</p></div></li>
+      </ol>
+      <figure class="shot"><img src="shots/Wizard-5.png" alt="Setup step 5: phone alerts"><figcaption>Step 5 - the topic stays hidden until you press Show: anyone who knows it can read your alerts.</figcaption></figure>
+      <p>You can set how loud each kind of alert is (ntfy priority 1 to 5), or add a webhook of your own beside ntfy: Guard posts every alert to it as JSON (title, body, severity, host, time). <strong>Skip this step</strong> if you want to do it later.</p>
+
+      <h3>6 · Protection</h3>
+      <p>Choose a preset - <strong>Recover NT8</strong> is the default - or switch single items. Off means Guard only alerts you.</p>
+      <figure class="shot"><img src="shots/Wizard-6.png" alt="Setup step 6: protection preset and switches"><figcaption>Step 6 - the preset, and each switch on its own.</figcaption></figure>
+
+      <h3>7 · Start Guard</h3>
+      <p><strong>Finish setup</strong> installs Guard's three scheduled tasks for your Windows user, runs each once and waits for it to report, then sends a test alert. From then on Guard watches NinjaTrader and starts it when it is down.</p>
+      <figure class="shot"><img src="shots/Wizard-7.png" alt="Setup step 7: Start Guard"><figcaption>Step 7 - Finish setup, then the fire drill.</figcaption></figure>
+    </section>
+
+    <!-- 3 DRILL -->
+    <section id="drill">
+      <div class="sec-head"><span class="label">Step 3</span><h2>The fire drill</h2></div>
+      <p>The drill proves the whole chain once, with your phone in the loop. For about three minutes the feed guard ignores the market data, exactly as if the feed had died. It should notice, re-subscribe, then disconnect and reconnect the connection serving your watch list - and your phone gets the alerts a real outage sends.</p>
+      <ol class="steps">
+        <li><div><p>Be <strong>flat</strong>: the disconnect switches off the strategies on that connection, so Guard checks with the NT8 link first and refuses if you are not.</p></div></li>
+        <li><div><p>Run it while the market is <strong>open</strong>: <strong>Tools → Run the fire drill</strong> (or from the wizard's last step). The window lists each step as it happens.</p></div></li>
+      </ol>
+      <div class="note"><span class="label">On a weekend</span><p>Connect NinjaTrader to its <strong>Simulated Data Feed</strong> (Connections → Simulated Data Feed) with your watch-list instruments served by it. That feed never closes, so the feed guard turns the market calendar off and the drill runs.</p></div>
+      <p>Strategies you switched off to be flat stay off afterwards; switch them back on yourself.</p>
+    </section>
+
+    <!-- PANEL -->
+    <section id="panel">
+      <div class="sec-head"><span class="label">Using it</span><h2>The control panel</h2></div>
+      <p>Open it from the Start menu: <strong>NT8 Guard</strong>. It reads what the watchdogs and add-ons report every two seconds; closing it changes nothing.</p>
+
+      <h3>Status</h3>
+      <p>One card per piece - NinjaTrader, its market data, the auto-login, the watchdogs, the two add-ons, the strategy backups, phone alerts - green, amber or red, with what to do about anything not green. Recent events below, in plain sentences. <strong>Pause Guard</strong> is at the top right.</p>
+      <figure class="shot"><img src="shots/Status.png" alt="Status tab: all green"><figcaption>Status - all good.</figcaption></figure>
+
+      <h3>Protection</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Switch</th><th>Watch only</th><th>Recover NT8</th><th>Hands-off</th></tr></thead>
+          <tbody>
+            <tr><td>Start NinjaTrader when it closes or crashes</td><td>alert</td><td>on</td><td>on</td></tr>
+            <tr><td>Restart NinjaTrader when it freezes</td><td>alert</td><td>on</td><td>on</td></tr>
+            <tr><td>Reconnect dropped connections</td><td>alert</td><td>on</td><td>on</td></tr>
+            <tr><td>Recover a silent feed</td><td>alert</td><td>on</td><td>on</td></tr>
+            <tr><td>Never disconnect an account holding a position</td><td colspan="3">always on</td></tr>
+            <tr><td>Put back strategies NinjaTrader dropped, on their charts</td><td>alert</td><td>on</td><td>on</td></tr>
+            <tr><td>Switch strategies back on</td><td>alert</td><td>alert</td><td>on</td></tr>
+            <tr><td>Close an unprotected position first</td><td>alert</td><td>alert</td><td>on</td></tr>
+            <tr><td>Save a crash report when NinjaTrader freezes</td><td colspan="3">off by default (3 to 6 GB each)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Switching strategies back on is an alert by default: an alert tells you, per strategy, whether its account has no position, a protected one or an <strong>unprotected</strong> one, so the decision stays yours.</p>
+      <figure class="shot"><img src="shots/Protection.png" alt="Protection tab"><figcaption>Protection - change a switch, then Save.</figcaption></figure>
+
+      <h3>Alerts</h3>
+      <p>The ntfy server (<code>https://ntfy.sh</code> unless you run your own), your private topic and its QR code (<strong>New topic</strong> makes a fresh one), how loud each kind of alert is, an optional webhook, and <strong>Send a test</strong>.</p>
+      <figure class="shot"><img src="shots/Alerts.png" alt="Alerts tab"><figcaption>Alerts - the topic and webhook stay hidden until you press Show.</figcaption></figure>
+
+      <h3>Strategy backups</h3>
+      <p>Every strategy Guard has saved: account, instrument, the chart it sits on, when it was saved, and its state - <strong>on the list</strong>, <strong>missing</strong> (dropped across a restart; put back automatically at the next start, or now with <strong>Put back now</strong>), or <strong>removed by you</strong> (<strong>Bring back</strong> or <strong>Forget</strong>).</p>
+      <figure class="shot"><img src="shots/Backups.png" alt="Strategy backups tab"><figcaption>Strategy backups - saved every 30 minutes, or now with Save now.</figcaption></figure>
+      <div class="note warn"><span class="label">Put back now closes NinjaTrader</span><p>Abruptly, on purpose: a normal close drops switched-off strategies from the list - the very thing it repairs. Guard checks you are flat first. Save your workspace in NinjaTrader before, if you changed charts since it started.</p></div>
+
+      <h3>Watch list</h3>
+      <p>The instruments, the stale time and extra closed days - and what the feed guard made of them right now.</p>
+      <figure class="shot"><img src="shots/Watch.png" alt="Watch list tab"><figcaption>Watch list.</figcaption></figure>
+
+      <h3>Tools</h3>
+      <p>Test alert, pause, <strong>Test login</strong>, the <strong>fire drill</strong>, a <strong>diagnostics zip</strong> for a bug report (alert address, Windows user name and PC name masked; no password or strategy settings), Guard's and NinjaTrader's folders, the setup pages, and <strong>Uninstall</strong>.</p>
+      <figure class="shot"><img src="shots/Tools.png" alt="Tools tab"><figcaption>Tools.</figcaption></figure>
+    </section>
+
+    <!-- WHAT HAPPENS WHEN -->
+    <section id="when">
+      <div class="sec-head"><span class="label">Using it</span><h2>What happens when…</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Event</th><th>What Guard does (Recover NT8)</th></tr></thead>
+          <tbody>
+            <tr><td>NinjaTrader crashes or is closed</td><td>The relauncher puts back any strategies NinjaTrader dropped (on their charts), starts it and logs in - within about a minute. After the start the overwatch reconnects the connections that were connected before, one at a time.</td></tr>
+            <tr><td>NinjaTrader freezes</td><td>Proven over three checks a minute apart (window not answering and an add-on stopped), then restarted. A frozen window with both add-ons alive - usually you compiling a script - is only an alert.</td></tr>
+            <tr><td>A connection drops</td><td>The feed guard reconnects it. One you disconnect yourself stays off.</td></tr>
+            <tr><td>Prices stop while the market is open</td><td>The feed guard re-subscribes; if prices stay silent it disconnects and reconnects the connection serving the watch list - unless that account holds a position (then it waits and alerts you). If that cannot fix it, the overwatch restarts NinjaTrader.</td></tr>
+            <tr><td>A strategy vanishes from the list</td><td>Lost across a restart: put back automatically before the next start, on its chart. Removed by you within one session: listed as removed by you - nothing happens unless you press Bring back.</td></tr>
+            <tr><td>Windows restarts (an update, a power cut)</td><td>Guard's tasks start when you sign in. If Windows signs in by itself, NinjaTrader is running a minute later; if it asks for a password, NinjaTrader starts once you sign in.</td></tr>
+            <tr><td>The PC sleeps</td><td>Everything stops, Guard included. On wake the feed guard sees the silent feed by the clock and recovers it. Keep the PC awake while you trade.</td></tr>
+            <tr><td>The screen is locked</td><td>Guard cannot type behind the lock screen: it waits and starts NinjaTrader within a minute of the unlock, and alerts you.</td></tr>
+            <tr><td>The login fails</td><td>Retried, with alerts. Two refusals of the password in a row stop the starts until you save it again or log in by hand once. Four starts in 30 minutes that do not stay up pause restarts for an hour, then longer.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Each problem pages your phone once (again after 6 hours if it is still there), not every minute.</p>
+    </section>
+
+    <!-- PAUSE -->
+    <section id="pause">
+      <div class="sec-head"><span class="label">Using it</span><h2>Pausing</h2></div>
+      <p>Closing NinjaTrader on purpose - maintenance, an update, a reboot of your own? <strong>Pause first</strong> (Status or Tools: 30 min, 2 h or 8 h), or the relauncher starts it again within a minute. A pause always ends by itself (24 hours at most), and <strong>Resume</strong> ends it early.</p>
+    </section>
+
+    <!-- UPDATE -->
+    <section id="update">
+      <div class="sec-head"><span class="label">Using it</span><h2>Updating</h2></div>
+      <ol class="steps">
+        <li><div><p>Close the NT8 Guard window. Extract the new zip and run its <strong>Install.cmd</strong>.</p></div></li>
+        <li><div><p>Your settings, saved password, logs and strategy backups are kept; the program is swapped in whole, so a task never starts a half-copied program.</p></div></li>
+        <li><div><p>If the release has newer add-ons, Status says so: import the new <code>NT8Guard-AddOns.zip</code> in NinjaTrader, while flat.</p></div></li>
+      </ol>
+    </section>
+
+    <!-- UNINSTALL -->
+    <section id="uninstall">
+      <div class="sec-head"><span class="label">Using it</span><h2>Uninstalling</h2></div>
+      <p><strong>Tools → Uninstall</strong> removes Guard's three tasks, the Start-menu shortcut and - once the window closes - Guard's folder (settings, saved password, logs, the backups list).</p>
+      <p>NinjaTrader is not touched. The two add-ons stay until you delete them in NinjaTrader's NinjaScript Editor (AddOns folder: <code>AutoReconnect</code>, <code>NT8BridgeServer</code> and <code>NT8BridgeServerPlayback</code> - keep the last two if another tool uses the NT8 link), while flat. The strategy backup templates (<code>templates\Strategy\…\Guard backup - *.xml</code>) are yours to keep or delete.</p>
+    </section>
+
+    <!-- TROUBLESHOOTING -->
+    <section id="troubleshooting">
+      <div class="sec-head"><span class="label">Reference</span><h2>Troubleshooting</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>You see</th><th>Do this</th></tr></thead>
+          <tbody>
+            <tr><td>Install.cmd: "cannot find the app folder"</td><td>Extract the whole zip first (right-click → Extract All), then run Install.cmd from the extracted folder.</td></tr>
+            <tr><td>Install.cmd: "Close the NT8 Guard window first"</td><td>Close the control panel and run it again.</td></tr>
+            <tr><td>Step 1: Guard's Python is red</td><td>Run Install.cmd again from the extracted zip.</td></tr>
+            <tr><td>Step 1: Other watchdogs is red</td><td>Disable the task it names in Task Scheduler (right-click → Disable), or close the program it names, then press Check again.</td></tr>
+            <tr><td>Step 3: a light stays grey</td><td>The import must compile: open New → NinjaScript Editor, press F5, and read NinjaTrader's Log tab for an error.</td></tr>
+            <tr><td>Feed guard "older than this Guard expects"</td><td>Import the <code>NT8Guard-AddOns.zip</code> that came with this version.</td></tr>
+            <tr><td>NinjaTrader stays at its login window</td><td>Tick Remember username in it once; save the password again (Tools → NinjaTrader login); then Test login.</td></tr>
+            <tr><td>"The saved password was refused twice"</td><td>Guard stopped trying so your broker does not lock the account. Save the right password, or log in by hand once.</td></tr>
+            <tr><td>No alerts on the phone</td><td>Alerts → Send a test. The ntfy app must be subscribed to exactly the same topic, with notifications allowed.</td></tr>
+            <tr><td>Fire drill: "the market is closed"</td><td>Run it while the market is open, or on NinjaTrader's Simulated Data Feed.</td></tr>
+            <tr><td>Fire drill / Put back: "can't confirm you're flat"</td><td>The NT8 link did not answer or answered something it could not mean. Wait a minute after NinjaTrader starts; check the NT8 link card on Status.</td></tr>
+            <tr><td>NinjaTrader restarted and you do not know why</td><td>Status → Recent events says why; Tools → Logs has the detail.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>For a bug report, attach <strong>Tools → Diagnostics zip</strong> (secrets masked) to an issue on the project's GitHub page (cli-nt-bridge).</p>
+    </section>
+
+    <!-- LIMITS -->
+    <section id="limits">
+      <div class="sec-head"><span class="label">Reference</span><h2>Known limits</h2></div>
+      <ul>
+        <li><strong>A locked screen</strong> holds the login until you unlock (Windows does not let a program type into a window behind the lock screen).</li>
+        <li><strong>Guard runs while you are signed in to Windows</strong> - so does NinjaTrader. A Windows that asks for a password at startup starts NinjaTrader after you sign in.</li>
+        <li><strong>Sleep stops everything.</strong> Keep the PC awake while you trade.</li>
+        <li><strong>One NinjaTrader per Windows user.</strong></li>
+        <li><strong>Tested NinjaTrader versions:</strong> 8.1.6.3 and 8.1.8.3. Parts of Guard read NinjaTrader's internals; each one checks itself and turns into an alert if a future version moves it.</li>
+        <li><strong>A strategy you remove within one NinjaTrader session</strong> is never put back by itself; one lost across a restart is.</li>
+      </ul>
+    </section>
+
+    <!-- PRIVACY -->
+    <section id="privacy">
+      <div class="sec-head"><span class="label">Reference</span><h2>Privacy</h2></div>
+      <ul>
+        <li><strong>Nothing is sent anywhere</strong> except the alerts you set up: to the ntfy server (and your webhook, if any). No telemetry.</li>
+        <li><strong>Your topic is the key to your alerts.</strong> Anyone who knows it can read them. Guard makes a long random one; keep it private, or run your own ntfy server.</li>
+        <li><strong>Your NinjaTrader password</strong> is encrypted with Windows' own protection for your user on this PC; another user, or another PC, cannot read the file.</li>
+        <li><strong>The diagnostics zip</strong> masks the alert address, your Windows user name and the PC name, and leaves out the password and strategy settings.</li>
+      </ul>
+    </section>
+
+    <!-- FILES -->
+    <section id="files">
+      <div class="sec-head"><span class="label">Reference</span><h2>Files &amp; settings</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Where</th><th>What</th></tr></thead>
+          <tbody>
+            <tr><td class="nw"><code>%LOCALAPPDATA%\NT8Guard\</code></td><td>Everything of Guard's: <code>guard.json</code> (settings), <code>secrets\</code> (the encrypted password), <code>state\</code>, <code>events\</code>, <code>logs\</code> (rotated at 5 MB; NinjaTrader's own logs archived for 7 days in <code>logs\nt8\</code>), <code>app\</code> and <code>python\</code> (the program).</td></tr>
+            <tr><td class="nw">NinjaTrader's folder</td><td>The two add-ons (<code>bin\Custom\AddOns\</code>), the feed guard's settings and reports (<code>AutoReconnect.*</code>), the NT8 link's request folder (<code>NT8Bridge\</code>), and the strategy backup templates (<code>templates\Strategy\…\Guard backup - *.xml</code>).</td></tr>
+            <tr><td class="nw">Task Scheduler</td><td><code>NT8Guard-Relaunch</code> and <code>NT8Guard-Overwatch</code> (every minute), <code>NT8Guard-LogArchive</code> (every 10 minutes) - for your user only.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Every setting has a default and the control panel writes them all; <code>app\README.md</code> lists each one for anyone who prefers a text editor.</p>
+      <p class="foot">NT8 Guard is open source (MIT). It is not made, endorsed or supported by NinjaTrader, LLC.</p>
+    </section>
+  </main>
+</div>
+</body>
+</html>

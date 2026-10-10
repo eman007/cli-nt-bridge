@@ -1,4 +1,4 @@
-// NT8BridgeServer.cs — NT8 Bridge AddOn (Part 2 v1: in-process compile handler)
+﻿// NT8BridgeServer.cs — NT8 Bridge AddOn (Part 2 v1: in-process compile handler)
 //
 // Watches  <UserDataDir>\NT8Bridge\trigger\  for {kind:"compile"} request files,
 // calls NinjaTrader.Code.Compiler.Compile(...) via reflection, and writes the
@@ -45,6 +45,29 @@ namespace NinjaTrader.NinjaScript.AddOns
         // MUST be a ConcurrentDictionary; read by the poller thread (connections handler).
         private readonly ConcurrentDictionary<string, string> _dropClass = new ConcurrentDictionary<string, string>();
 
+        // ===== Output tee: NT8's Output 1 / Output 2 (Print) -> per-tab JSONL =====
+        // OPT-IN via the marker file <NT8>/NT8Bridge/output/tee.on, which the CLI writes
+        // directly — so turning the tee on takes effect within one poll tick and needs NO
+        // NT8 reload (a reload here costs a strategy restart every time).
+        //
+        // Print() runs on strategy CALCULATION threads, on every tick, for the chattiest
+        // strategies on this box. So OnNtOutput does NO I/O: it stamps, enqueues, returns.
+        // A synchronous file append there would put disk latency and lock contention on the
+        // tick path — the same shape as the ATM stale-ID flood that saturated the logger
+        // mutex and ended in a WER crash. The drain runs on the poller instead, OUTSIDE the
+        // compile gate, so a long compile can't stall it into overflow.
+        private sealed class TeeRec { public string T; public int Tab; public string Msg; public bool Reset; }
+        private string _outDir;
+        private string _teeMarker;
+        private volatile bool _teeOn;
+        private readonly ConcurrentQueue<TeeRec> _teeQueue = new ConcurrentQueue<TeeRec>();
+        private int _teeQueued;                              // Interlocked: ConcurrentQueue has no cheap Count
+        private const int TeeQueueMax = 20000;               // past this: drop + count, so memory stays bounded
+        private int _teeDropped1, _teeDropped2;              // per-tab drop counters (Interlocked)
+        private const long TeeRotateBytes = 10L * 1024 * 1024;   // rotate at 10 MB, keep one generation
+        private int _teeDraining;                            // re-entrancy guard (the drain is single-threaded)
+        private bool _teeSubscribed;
+
         protected override void OnStateChange()
         {
             try
@@ -60,6 +83,16 @@ namespace NinjaTrader.NinjaScript.AddOns
                 else if (State == State.Terminated)
                 {
                     try { Connection.ConnectionStatusUpdate -= OnConnStatus; } catch { }
+                    if (_teeSubscribed)
+                    {
+                        try { NinjaTrader.Code.Output.OutputEvent -= OnNtOutput; } catch { }
+                        _teeSubscribed = false;
+                    }
+                    _teeOn = false;
+                    // Flush what's queued so a reload loses nothing — through the SAME guard the
+                    // poller uses, since Terminated runs on a different thread and two threads in
+                    // DrainTee would interleave appends to one file.
+                    try { FlushTeeGuarded(); } catch { }
                     try { if (_poller != null) _poller.Dispose(); } catch { }
                     _poller = null;
                 }
@@ -77,6 +110,14 @@ namespace NinjaTrader.NinjaScript.AddOns
             // Diagnostic heartbeat: proves the AddOn loaded and the poller started.
             WriteResult("heartbeat.json",
                 "{\"server\":\"NT8BridgeServer\",\"started\":" + JsonStr(Globals.Now.ToString("o")) + "}");
+            // Output tee: the marker decides whether it records; subscribing is harmless when
+            // it's off (the handler returns on a single volatile bool read).
+            _outDir = Path.Combine(root, "output");
+            _teeMarker = Path.Combine(_outDir, "tee.on");
+            _teeOn = File.Exists(_teeMarker);
+            try { NinjaTrader.Code.Output.OutputEvent += OnNtOutput; _teeSubscribed = true; }
+            catch (Exception ex) { LogSafe("tee subscribe: " + ex.Message); }
+            LogSafe("tee: Output 1/2 capture " + (_teeOn ? "ON" : "off (drop " + _teeMarker + " to enable)"));
             // Poll once per second on wall-clock time; never tick-time.
             _poller = new Timer(delegate { Poll(); }, null, 1000, 1000);
             // Classify every connection status change at the moment it happens (named
@@ -89,6 +130,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private void Poll()
         {
             TryBeat();   // UI-liveness heartbeat (runs regardless of the compile gate)
+            TeeTick();   // Output 1/2 drain — OUTSIDE the gate, so a long compile can't stall it
             // Re-entrancy guard: skip this tick if the previous compile is still running.
             if (!Monitor.TryEnter(_gate)) return;
             try
@@ -195,6 +237,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     WriteResult("workspace_" + id + ".json", RunWorkspace(id));
                 else if (kind == "strategies")
                     WriteResult("strategies_" + id + ".json", RunStrategies(id, text));
+                else if (kind == "ghostorders")
+                    WriteResult("ghostorders_" + id + ".json", RunGhostOrders(id, text));
                 else if (kind == "screenshot")
                     WriteResult("screenshot_" + id + ".json", RunScreenshot(id, text));
                 else if (kind == "peek")
@@ -256,6 +300,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (kind == "ntstatus") return "ntstatus_";
             if (kind == "workspace") return "workspace_";
             if (kind == "strategies") return "strategies_";
+            if (kind == "ghostorders") return "ghostorders_";
             if (kind == "screenshot") return "screenshot_";
             if (kind == "peek") return "peek_";
             if (kind == "probe") return "probe_";
@@ -912,6 +957,328 @@ namespace NinjaTrader.NinjaScript.AddOns
             return null;
         }
 
+        // ── ghostorders ─────────────────────────────────────────────────────────────────────────────────
+        //  Find "ghost" orders — the stuck yellow lines that never clear — and, on a SIMULATION account,
+        //  clear them by resetting it.
+        //
+        //  ⭐ WHAT A GHOST ORDER ACTUALLY IS. Not a working order: an order wedged in a TRANSITIONAL
+        //  state that should have resolved in milliseconds and never did —
+        //      CancelPending | ChangePending | Initialized,  older than staleSeconds (default 2).
+        //  Those three states are all "NinjaTrader has asked the broker something and is waiting". A
+        //  working order sitting for hours is normal and is NOT a ghost; a CancelPending sitting for
+        //  two seconds is already wrong. That predicate is lifted from a vendor indicator that has
+        //  been solving this on this desk for a long time — it is theirs, and it is right.
+        //
+        //  ! THE PROVIDER CHECK IS AN ALLOWLIST AND MUST STAY ONE.
+        //    Reset is permitted ONLY when Provider == Provider.Simulator. Do NOT rewrite this as
+        //    "not Live" or any other denylist: real funded accounts report an unnamed provider
+        //    (observed as Provider31), so a denylist silently admits them — and this call wipes the
+        //    account. An allowlist fails closed on anything it does not recognise.
+        //
+        //  ! LIVE ACCOUNTS HAVE NO EQUIVALENT and this deliberately offers none. For those the fix is
+        //    manual: cancel externally, disconnect/reconnect every connection, and if they persist,
+        //    Control Center > Tools > Database Management > Reset DB, then restart. We report them so
+        //    you know, and refuse to touch them.
+        //
+        //  ⚠ clearTradeData DEFAULTS TO FALSE HERE, unlike the vendor which always passes true. `true`
+        //    wipes the account's trade history, and this desk's journal ingests sim fills — silently
+        //    destroying that record while "clearing a stuck order" would be a bad trade. Opt in.
+        //
+        //  request : {"id","kind":"ghostorders","account":"SimX","reset":true,
+        //             "clearTradeData":true,"staleSeconds":"2"}
+        //  response: {"id","status","ts","staleSeconds",
+        //             "accounts":[{name,provider,isSimulator,connectionStatus,orders,frozenCount,
+        //                          frozen:[{orderId,name,instrument,state,action,quantity,ageSeconds}]}],
+        //             "reset":{account,performed,clearTradeData,reason},"notes":[],"errors":[]}
+        private string RunGhostOrders(string id, string text)
+        {
+            var notes = new List<string>();
+            try
+            {
+                string acctFilter = ExtractJsonString(text, "account");
+                bool doReset      = JsonBoolFlag(text, "reset");
+                bool clearTrades  = JsonBoolFlag(text, "clearTradeData");
+                bool doCancel     = JsonBoolFlag(text, "cancel");
+                double staleSec = 2.0;
+                try { string s = ExtractJsonString(text, "staleSeconds"); if (!string.IsNullOrEmpty(s)) staleSec = double.Parse(s, InvCi); } catch { }
+                if (staleSec < 0) staleSec = 0;
+
+                var accts = new List<Account>();
+                try { lock (Account.All) { foreach (Account a in Account.All) accts.Add(a); } } catch (Exception ex) { notes.Add("Account.All: " + ex.Message); }
+
+                var rows = new List<string>();
+                Account target = null;
+                int totalFrozen = 0;
+                // The Order objects behind the STALLED rows of the targeted account. `flatten` cannot
+                // reach these: it gates on IsWorkingState, and CancelPending is deliberately not a
+                // working state, so acct.Cancel() was never called on exactly the orders that need it.
+                var cancelTargets = new List<Order>();
+                foreach (Account a in accts)
+                {
+                    string aname = SafeStr(delegate { return a.Name; });
+                    if (!string.IsNullOrEmpty(acctFilter) && aname != acctFilter) continue;
+                    if (!string.IsNullOrEmpty(acctFilter)) target = a;
+
+                    string provider = SafeStr(delegate { return a.Provider.ToString(); });
+                    bool isSim = false;
+                    try { isSim = (a.Provider == Provider.Simulator); } catch { }
+                    string connSt = SafeStr(delegate { return a.ConnectionStatus.ToString(); });
+
+                    // Snapshot under the lock, evaluate after it (Lesson #159).
+                    var snap = new List<Order>();
+                    try { lock (a.Orders) { foreach (Order o in a.Orders) snap.Add(o); } } catch { }
+
+                    // Which instruments is this account actually IN? An order is only orphaned if
+                    // nothing backs it. Snapshot under the lock, compare after.
+                    var openInstruments = new List<string>();
+                    try
+                    {
+                        lock (a.Positions)
+                        {
+                            foreach (Position pz in a.Positions)
+                            {
+                                string mp = SafeStr(delegate { return pz.MarketPosition.ToString(); });
+                                if (mp == "Flat" || mp == "") continue;
+                                openInstruments.Add(SafeStr(delegate { return pz.Instrument.FullName; }));
+                            }
+                        }
+                    }
+                    catch { }
+
+                    var frozen = new List<string>();
+                    foreach (Order o in snap)
+                    {
+                        string st = SafeStr(delegate { return o.OrderState.ToString(); });
+                        double age = -1;
+                        try { age = (DateTime.Now - o.Time).TotalSeconds; } catch { }
+
+                        // TWO kinds of ghost, and the second is the one that actually draws a stuck
+                        // yellow line on your chart.
+                        //
+                        // (a) STALLED - wedged in a transitional state that should have resolved in
+                        //     milliseconds. This is the vendor's definition and it is right, as far
+                        //     as it goes.
+                        // ! AGE CAN BE NEGATIVE, AND THAT MUST NOT SILENCE US.
+                        //   NinjaTrader stamps Order.Time in EXCHANGE time (ET); this desk's boxes run
+                        //   PT, so DateTime.Now - o.Time is about -3h for anything recent. Comparing
+                        //   `age >= staleSeconds` therefore rejected EVERY order and reported a clean
+                        //   box while a CancelPending Stop1 sat on the chart (observed 2026-09-08,
+                        //   a sim strategy on NQ, reported ageMinutes = -109). Same root cause as the known
+                        //   bridge timestamp bug.
+                        //   A staleness guard that fails CLOSED is worse than no guard: it converts a
+                        //   detector into a liar. So a negative age means "the clock comparison is not
+                        //   trustworthy here", and the order qualifies on its STATE alone - which is
+                        //   the part that actually carries the meaning. clockSkew is reported per row
+                        //   so nobody trusts the age field afterwards.
+                        bool ageUnknown = age < 0;
+                        bool oldEnough  = ageUnknown || age >= staleSec;
+
+                        bool stalled = (st == "CancelPending" || st == "ChangePending" || st == "Initialized")
+                                       && oldEnough;
+
+                        // (b) ORPHANED - alive, but nothing behind it. Observed 2026-09-08 on
+                        //     a sim strategy: a Stop1 left in a live state after its position closed and
+                        //     its OCO sibling cancelled correctly. The vendor's predicate does NOT
+                        //     see this, because the order never entered a transitional state at all -
+                        //     it simply was never resolved. That is precisely the stuck yellow line.
+                        //
+                        //     ! A resting ENTRY with no position is legitimate and extremely common,
+                        //       so this is reported as its own category and never auto-actioned on
+                        //       its own. Judgement stays with the human; the tool only surfaces it.
+                        bool live = (st == "Working" || st == "Accepted" || st == "Submitted"
+                                     || st == "TriggerPending" || st == "PartFilled"
+                                     || st == "ChangeSubmitted" || st == "CancelSubmitted");
+                        string instr = SafeStr(delegate { return o.Instrument.FullName; });
+                        bool orphaned = live && oldEnough && !openInstruments.Contains(instr);
+
+                        if (!stalled && !orphaned) continue;
+                        // ONLY stalled orders are ever cancel-targets. An ORPHANED resting entry is
+                        // legitimate and common; auto-cancelling it would destroy a live intent, so
+                        // that judgement stays with the human (see the note above).
+                        if (stalled && !string.IsNullOrEmpty(acctFilter) && aname == acctFilter)
+                            cancelTargets.Add(o);
+                        frozen.Add("{\"orderId\":" + JsonStrOrNull(SafeStr(delegate { return o.OrderId; }))
+                                 + ",\"name\":" + JsonStrOrNull(SafeStr(delegate { return o.Name; }))
+                                 + ",\"instrument\":" + JsonStrOrNull(instr)
+                                 + ",\"state\":" + JsonStrOrNull(st)
+                                 + ",\"action\":" + JsonStrOrNull(SafeStr(delegate { return o.OrderAction.ToString(); }))
+                                 + ",\"quantity\":" + SafeInt(delegate { return o.Quantity; }).ToString(InvCi)
+                                 + ",\"stopPrice\":" + SafeStr(delegate { return o.StopPrice.ToString(InvCi); })
+                                 + ",\"oco\":" + JsonStrOrNull(SafeStr(delegate { return o.Oco; }))
+                                 + ",\"kind\":" + JsonStr(stalled ? "stalled" : "orphaned")
+                                 + ",\"clockSkew\":" + (ageUnknown ? "true" : "false")
+                                 + ",\"accountHasPosition\":" + (openInstruments.Contains(instr) ? "true" : "false")
+                                 + ",\"ageSeconds\":" + ((long)age).ToString(InvCi) + "}");
+                    }
+                    totalFrozen += frozen.Count;
+
+                    // includeAll: every order in the live collection with its state, for when a chart
+                    // shows a line that the ghost predicates do not explain. Diagnostic only, capped.
+                    var allRows = new List<string>();
+                    if (JsonBoolFlag(text, "includeAll"))
+                    {
+                        int n = 0;
+                        foreach (Order o in snap)
+                        {
+                            if (++n > 60) break;
+                            double ag = -1; try { ag = (DateTime.Now - o.Time).TotalSeconds; } catch { }
+                            allRows.Add("{\"name\":" + JsonStrOrNull(SafeStr(delegate { return o.Name; }))
+                                      + ",\"state\":" + JsonStrOrNull(SafeStr(delegate { return o.OrderState.ToString(); }))
+                                      + ",\"instrument\":" + JsonStrOrNull(SafeStr(delegate { return o.Instrument.FullName; }))
+                                      + ",\"quantity\":" + SafeInt(delegate { return o.Quantity; }).ToString(InvCi)
+                                      + ",\"filled\":" + SafeInt(delegate { return o.Filled; }).ToString(InvCi)
+                                      + ",\"stopPrice\":" + SafeStr(delegate { return o.StopPrice.ToString(InvCi); })
+                                      + ",\"limitPrice\":" + SafeStr(delegate { return o.LimitPrice.ToString(InvCi); })
+                                      + ",\"ageMinutes\":" + ((long)(ag/60)).ToString(InvCi) + "}");
+                        }
+                    }
+
+                    rows.Add("{\"name\":" + JsonStrOrNull(aname)
+                           + ",\"provider\":" + JsonStrOrNull(provider)
+                           + ",\"isSimulator\":" + (isSim ? "true" : "false")
+                           + ",\"connectionStatus\":" + JsonStrOrNull(connSt)
+                           + ",\"orders\":" + snap.Count.ToString(InvCi)
+                           + ",\"frozenCount\":" + frozen.Count.ToString(InvCi)
+                           + ",\"frozen\":[" + string.Join(",", frozen.ToArray()) + "]"
+                           + ",\"allOrders\":[" + string.Join(",", allRows.ToArray()) + "]}");
+                }
+
+                // ── cancel ──────────────────────────────────────────────────────────────────────────
+                // Why this exists: --reset was the only remedy offered, and on 2026-09-21 it reported
+                // performed:true while changing NOTHING, four times across two accounts, costing ~80
+                // minutes of a live session. ResetSimulationAccount() simply does not clear an order
+                // wedged in CancelPending. acct.Cancel() does reach them - `flatten` just never passes
+                // them to it, because it filters on IsWorkingState first.
+                //
+                // ★ AND IT VERIFIES. A remedy that reports success without re-reading the state is
+                //   worse than no remedy: it sends you off to chase the wrong cause. So after
+                //   cancelling we re-scan the account and report what is ACTUALLY left.
+                string cancelJson = "null";
+                if (doCancel)
+                {
+                    string creason = null;
+                    if (string.IsNullOrEmpty(acctFilter)) creason = "cancel requires an explicit account name; it will never cancel across every account";
+                    else if (target == null)              creason = "account not found: " + acctFilter;
+
+                    int attempted = cancelTargets.Count;
+                    int stillStalled = -1;
+                    var cancelledIds = new List<string>();
+                    if (creason == null && attempted > 0)
+                    {
+                        foreach (Order o in cancelTargets)
+                            cancelledIds.Add(JsonStrOrNull(SafeStr(delegate { return o.OrderId; })));
+                        try
+                        {
+                            LogSafe("GHOSTORDERS cancel account=" + acctFilter + " orders=" + attempted);
+                            target.Cancel(cancelTargets);          // acts AFTER the locks (Lesson #159)
+                        }
+                        catch (Exception ex) { creason = "Cancel threw: " + ex.Message; }
+
+                        // Re-read rather than assume. NT8 needs a moment to process the cancels.
+                        if (creason == null)
+                        {
+                            try
+                            {
+                                System.Threading.Thread.Sleep(1200);
+                                var after = new List<Order>();
+                                lock (target.Orders) { foreach (Order o in target.Orders) after.Add(o); }
+                                stillStalled = 0;
+                                foreach (Order o in after)
+                                {
+                                    string st2 = SafeStr(delegate { return o.OrderState.ToString(); });
+                                    if (st2 == "CancelPending" || st2 == "ChangePending" || st2 == "Initialized")
+                                        stillStalled++;
+                                }
+                            }
+                            catch (Exception ex) { creason = "verify re-read threw: " + ex.Message; }
+                        }
+                    }
+                    if (creason != null) LogSafe("GHOSTORDERS cancel REFUSED/FAILED account='" + acctFilter + "': " + creason);
+                    cancelJson = "{\"account\":" + JsonStrOrNull(acctFilter)
+                               + ",\"attempted\":" + attempted.ToString(InvCi)
+                               + ",\"orderIds\":[" + string.Join(",", cancelledIds.ToArray()) + "]"
+                               + ",\"stillStalledAfter\":" + stillStalled.ToString(InvCi)
+                               + ",\"cleared\":" + ((creason == null && attempted > 0 && stillStalled == 0) ? "true" : "false")
+                               + ",\"reason\":" + JsonStrOrNull(creason) + "}";
+                }
+
+                string resetJson = "null";
+                if (doReset)
+                {
+                    string reason = null;
+                    if (string.IsNullOrEmpty(acctFilter)) reason = "reset requires an explicit account name; it will never reset every account";
+                    else if (target == null)              reason = "account not found: " + acctFilter;
+                    else
+                    {
+                        bool isSim = false;
+                        try { isSim = (target.Provider == Provider.Simulator); } catch { }
+                        // ALLOWLIST. Unknown provider => refuse.
+                        if (!isSim) reason = "'" + acctFilter + "' is provider '" + SafeStr(delegate { return target.Provider.ToString(); })
+                                           + "', not Simulator — refusing. ResetSimulationAccount is for simulation accounts only.";
+                    }
+
+                    bool performed = false;
+                    if (reason == null)
+                    {
+                        try
+                        {
+                            LogSafe("GHOSTORDERS reset account=" + acctFilter + " clearTradeData=" + clearTrades);
+                            target.ResetSimulationAccount(clearTrades);
+                            performed = true;
+                        }
+                        catch (Exception ex) { reason = "ResetSimulationAccount threw: " + ex.Message; }
+                    }
+                    if (reason != null) LogSafe("GHOSTORDERS reset REFUSED/FAILED account='" + acctFilter + "': " + reason);
+
+                    // ★ `performed` only means the CALL RETURNED. It says nothing about whether the
+                    //   ghosts actually went away, and on 2026-09-21 ResetSimulationAccount returned
+                    //   cleanly while leaving all four in CancelPending. Re-read and report the truth,
+                    //   so callers can stop trusting `performed` as an outcome.
+                    int stalledAfterReset = -1;
+                    if (performed)
+                    {
+                        try
+                        {
+                            System.Threading.Thread.Sleep(1200);
+                            var after = new List<Order>();
+                            lock (target.Orders) { foreach (Order o in target.Orders) after.Add(o); }
+                            stalledAfterReset = 0;
+                            foreach (Order o in after)
+                            {
+                                string st3 = SafeStr(delegate { return o.OrderState.ToString(); });
+                                if (st3 == "CancelPending" || st3 == "ChangePending" || st3 == "Initialized")
+                                    stalledAfterReset++;
+                            }
+                        }
+                        catch { }
+                    }
+                    resetJson = "{\"account\":" + JsonStrOrNull(acctFilter)
+                              + ",\"performed\":" + (performed ? "true" : "false")
+                              + ",\"stillStalledAfter\":" + stalledAfterReset.ToString(InvCi)
+                              + ",\"cleared\":" + ((performed && stalledAfterReset == 0) ? "true" : "false")
+                              + ",\"clearTradeData\":" + (clearTrades ? "true" : "false")
+                              + ",\"reason\":" + JsonStrOrNull(reason) + "}";
+                }
+
+                var sb = new StringBuilder();
+                sb.Append("{\"id\":").Append(JsonStr(id))
+                  .Append(",\"status\":\"ok\",\"ts\":").Append(JsonStr(DateTime.UtcNow.ToString("o")))
+                  .Append(",\"staleSeconds\":").Append(((int)staleSec).ToString(InvCi))
+                  .Append(",\"totalFrozen\":").Append(totalFrozen.ToString(InvCi))
+                  .Append(",\"accounts\":[").Append(string.Join(",", rows.ToArray())).Append("]")
+                  .Append(",\"cancel\":").Append(cancelJson)
+                  .Append(",\"reset\":").Append(resetJson)
+                  .Append(",\"notes\":[").Append(JoinJsonStrings(notes)).Append("]}");
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return "{\"id\":" + JsonStr(id) + ",\"status\":\"error\",\"accounts\":[],\"reset\":null"
+                     + ",\"notes\":[" + JoinJsonStrings(notes) + "]"
+                     + ",\"errors\":[{\"code\":\"BRIDGE\",\"message\":" + JsonStr(ex.GetType().Name + ": " + ex.Message) + "}]}";
+            }
+        }
+
         // ── strategies ──────────────────────────────────────────────────────────────────────────────────
         //  Read — and change — the ENABLED state of the strategies in the Control Center's Strategies tab.
         //
@@ -1015,10 +1382,20 @@ namespace NinjaTrader.NinjaScript.AddOns
                         skipped.Add(SkipJson(name, "bothLists", "named in both enable and disable"));
                         continue;
                     }
-                    StratRow row = null;
+                    // ★ ALL matching rows, not the first. The grid permits duplicate names, and
+                    //   a strategy ends up with two the moment a template is reapplied: the
+                    //   strategy's own DisplayName override reverts both rows to "MyStrategy".
+                    //   With a first-match-and-break, an EOD sweep disables ONE of them and leaves
+                    //   the other ENABLED OVERNIGHT — silently, since the caller is told the name
+                    //   was actioned. Which one survived came down to grid order.
+                    var matches = new List<StratRow>();
                     foreach (StratRow r in rows)
-                        if (string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)) { row = r; break; }
-                    if (row == null) { skipped.Add(SkipJson(name, "notInGrid", "not in the Control Center strategies grid")); continue; }
+                        if (string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)) matches.Add(r);
+                    if (matches.Count == 0) { skipped.Add(SkipJson(name, "notInGrid", "not in the Control Center strategies grid")); continue; }
+                    if (matches.Count > 1)
+                        notes.Add("'" + name + "' matches " + matches.Count.ToString(InvCi)
+                                + " grid rows; acting on ALL of them (duplicate strategy names are legal in NT8)");
+                    StratRow row = matches[0];
                     if (row.Enabled == on)
                     {
                         skipped.Add(SkipJson(name, on ? "alreadyEnabled" : "alreadyDisabled",
@@ -1405,11 +1782,24 @@ namespace NinjaTrader.NinjaScript.AddOns
         // (or stops) the strategy — IsEnabled and the routed commands both flip state without it.
         private bool ClickEnabledCheckbox(object grid, string name, bool wantEnabled, List<string> notes)
         {
-            bool cur = false; bool found = false;
+            // ★ Duplicate names are LEGAL in the grid, and a strategy acquires them every time a
+            //   template is reapplied (the DisplayName override reverts both rows to "MyStrategy").
+            //   Clicking only the first match meant an EOD sweep disabled ONE instance and left the
+            //   other running overnight, while reporting the name as actioned. Every row carrying
+            //   this name that is in the wrong state gets clicked.
+            bool cur = false; bool found = false; int rowsWithName = 0, rowsNeedingClick = 0;
             foreach (StratRow r in SnapshotGrid(grid))
-                if (string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)) { cur = r.Enabled; found = true; break; }
+                if (string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    rowsWithName++;
+                    if (!found) { cur = r.Enabled; found = true; }
+                    if (r.Enabled != wantEnabled) rowsNeedingClick++;
+                }
             if (!found) { notes.Add("'" + name + "': row vanished from the grid before the click"); return false; }
-            if (cur == wantEnabled) return true;
+            if (rowsNeedingClick == 0) return true;
+            if (rowsWithName > 1)
+                notes.Add("'" + name + "': " + rowsWithName.ToString(InvCi) + " rows share this name, "
+                        + rowsNeedingClick.ToString(InvCi) + " need the click");
 
             var boxes = new List<System.Windows.Controls.Primitives.ToggleButton>();
             CollectToggleButtons(grid as System.Windows.DependencyObject, boxes);
@@ -1422,14 +1812,16 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
             // The Enabled checkbox mirrors the current state, which is what tells it apart from any other
             // toggle that happens to sit on the row.
-            System.Windows.Controls.Primitives.ToggleButton pick = null;
+            // The Enabled checkbox mirrors its row's state, which is what tells it apart from any
+            // other toggle on the row — so "needs changing" is exactly "IsChecked != wantEnabled".
+            var toToggle = new List<System.Windows.Controls.Primitives.ToggleButton>();
             foreach (var b in matches)
             {
                 bool? ck = null; try { ck = b.IsChecked; } catch { }
-                if (ck.HasValue && ck.Value == cur) { pick = b; break; }
+                if (ck.HasValue && ck.Value != wantEnabled) toToggle.Add(b);
             }
-            if (pick == null && matches.Count == 1) pick = matches[0];
-            if (pick == null)
+            if (toToggle.Count == 0 && matches.Count == 1) toToggle.Add(matches[0]);
+            if (toToggle.Count == 0)
             {
                 notes.Add("'" + name + "': could not identify the Enabled checkbox (" + boxes.Count + " toggles in the grid, " + matches.Count + " on this row)");
                 return false;
@@ -1439,8 +1831,12 @@ namespace NinjaTrader.NinjaScript.AddOns
                 MethodInfo onClick = typeof(System.Windows.Controls.Primitives.ButtonBase)
                     .GetMethod("OnClick", BindingFlags.NonPublic | BindingFlags.Instance);
                 if (onClick == null) { notes.Add("ButtonBase.OnClick is not reachable on this .NET build"); return false; }
-                onClick.Invoke(pick, null);
-                return true;
+                int hit = 0;
+                foreach (var b in toToggle) { onClick.Invoke(b, null); hit++; }
+                if (hit < rowsNeedingClick)
+                    notes.Add("'" + name + "': clicked " + hit.ToString(InvCi) + " of " + rowsNeedingClick.ToString(InvCi)
+                            + " rows needing it — re-read `strategies` and repeat if one is still wrong");
+                return hit > 0;
             }
             catch (Exception ex)
             {
@@ -2077,8 +2473,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         //   Two things are needed to close that, and only together:
         //     1. resolve the targets PER KEY (rescues the keys written after the swap), and
         //     2. write the swap keys FIRST (rescues the keys written before it).
-        //   Reported by Quantrosoft as issue #6 (verified on 8.1.8.2); fixed and re-verified
-        //   live on 8.1.6.3.
+        //   Reported by Quantrosoft as issue #6 on the public repo (verified on 8.1.8.2).
         private string RunConfigure(string id, string triggerJson)
         {
             Window saWin = FindStrategyAnalyzerWindow();
@@ -3977,6 +4372,145 @@ namespace NinjaTrader.NinjaScript.AddOns
                 File.Move(tmp, dst);   // atomic rename so Python never reads a partial file
             }
             catch (Exception ex) { LogSafe("WriteResult: " + ex.Message); }
+        }
+
+        // ===== Output tee =====
+
+        // Every NT8 Print lands here, on whatever thread called Print — usually a strategy's
+        // calculation thread, every tick. Must stay allocation-light and NEVER touch disk or
+        // take a lock. Must also never throw: an exception escaping an OutputEvent subscriber
+        // would break Print() for the entire platform.
+        private void OnNtOutput(object sender, NinjaTrader.Code.OutputEventArgs e)
+        {
+            try
+            {
+                if (!_teeOn || e == null) return;
+                int tab = e.OutputTab == PrintTo.OutputTab2 ? 2 : 1;
+                if (Volatile.Read(ref _teeQueued) >= TeeQueueMax)
+                {
+                    // Bounded: drop, but COUNT it per tab so the drain can write a visible
+                    // {"dropped":N} record. A silent gap would read as "nothing was printed".
+                    if (tab == 2) Interlocked.Increment(ref _teeDropped2);
+                    else Interlocked.Increment(ref _teeDropped1);
+                    return;
+                }
+                _teeQueue.Enqueue(new TeeRec
+                {
+                    T = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture) + "Z",
+                    Tab = tab,
+                    Reset = e.IsReset,
+                    Msg = e.IsReset ? null : e.Message
+                });
+                Interlocked.Increment(ref _teeQueued);
+            }
+            catch { }
+        }
+
+        // Poller-thread half: pick up a marker flip, then flush. Guarded so two ticks can
+        // never write the same file concurrently (a slow disk makes that reachable).
+        private void TeeTick()
+        {
+            if (Interlocked.Exchange(ref _teeDraining, 1) == 1) return;
+            try
+            {
+                if (_teeMarker == null) return;
+                bool want = File.Exists(_teeMarker);
+                if (want != _teeOn)
+                {
+                    _teeOn = want;
+                    LogSafe("tee: Output 1/2 capture " + (want ? "ENABLED" : "disabled") + " (marker)");
+                }
+                DrainTee();
+            }
+            catch (Exception ex) { LogSafe("tee tick: " + ex.Message); }
+            finally { Interlocked.Exchange(ref _teeDraining, 0); }
+        }
+
+        // Drain once under the same guard, waiting briefly for an in-flight drain rather than
+        // racing it. Used by Terminated, which runs off the poller thread.
+        private void FlushTeeGuarded()
+        {
+            for (int i = 0; i < 20; i++)   // ~1s worth of 50ms waits, then give up rather than hang a reload
+            {
+                if (Interlocked.Exchange(ref _teeDraining, 1) == 0)
+                {
+                    try { DrainTee(); }
+                    catch (Exception ex) { LogSafe("tee flush: " + ex.Message); }
+                    finally { Interlocked.Exchange(ref _teeDraining, 0); }
+                    return;
+                }
+                Thread.Sleep(50);
+            }
+            LogSafe("tee flush: a drain was still in flight after 1s — skipped (queued records lost)");
+        }
+
+        // Drain the queue into per-tab JSONL. Single-threaded by construction, so the files
+        // need no cross-thread coordination and rotation is safe to do inline.
+        private void DrainTee()
+        {
+            if (_outDir == null) return;
+            var buf = new Dictionary<int, StringBuilder>();
+
+            // Drop markers first: they describe the gap that is about to precede these lines.
+            int d1 = Interlocked.Exchange(ref _teeDropped1, 0);
+            int d2 = Interlocked.Exchange(ref _teeDropped2, 0);
+            if (d1 > 0) TeeBuf(buf, 1).Append(TeeDropJson(1, d1));
+            if (d2 > 0) TeeBuf(buf, 2).Append(TeeDropJson(2, d2));
+
+            TeeRec rec;
+            int drained = 0;
+            while (drained < TeeQueueMax && _teeQueue.TryDequeue(out rec))
+            {
+                Interlocked.Decrement(ref _teeQueued);
+                drained++;
+                StringBuilder sb = TeeBuf(buf, rec.Tab);
+                sb.Append("{\"t\":").Append(JsonStr(rec.T)).Append(",\"tab\":").Append(rec.Tab);
+                if (rec.Reset) sb.Append(",\"reset\":true");
+                else sb.Append(",\"msg\":").Append(JsonStr(rec.Msg));
+                sb.Append("}\n");
+            }
+            if (buf.Count == 0) return;
+
+            Directory.CreateDirectory(_outDir);
+            foreach (KeyValuePair<int, StringBuilder> kv in buf)
+            {
+                string path = Path.Combine(_outDir, "tab" + kv.Key + ".jsonl");
+                try
+                {
+                    RotateTeeIfNeeded(path, kv.Value.Length);
+                    File.AppendAllText(path, kv.Value.ToString());
+                }
+                catch (Exception ex) { LogSafe("tee write tab" + kv.Key + ": " + ex.Message); }
+            }
+        }
+
+        private StringBuilder TeeBuf(Dictionary<int, StringBuilder> buf, int tab)
+        {
+            StringBuilder sb;
+            if (!buf.TryGetValue(tab, out sb)) { sb = new StringBuilder(); buf[tab] = sb; }
+            return sb;
+        }
+
+        private string TeeDropJson(int tab, int n)
+        {
+            return "{\"t\":" + JsonStr(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture) + "Z")
+                   + ",\"tab\":" + tab + ",\"dropped\":" + n + "}\n";
+        }
+
+        // One generation kept: tabN.jsonl -> tabN.1.jsonl. A chatty strategy must not fill
+        // the drive, and an unbounded log is one nobody reads anyway.
+        private void RotateTeeIfNeeded(string path, int incoming)
+        {
+            try
+            {
+                var fi = new FileInfo(path);
+                if (!fi.Exists || fi.Length + incoming <= TeeRotateBytes) return;
+                string prev = Path.ChangeExtension(path, null) + ".1.jsonl";
+                if (File.Exists(prev)) File.Delete(prev);
+                File.Move(path, prev);
+                LogSafe("tee: rotated " + Path.GetFileName(path) + " -> " + Path.GetFileName(prev));
+            }
+            catch (Exception ex) { LogSafe("tee rotate: " + ex.Message); }
         }
 
         private static string JsonStr(string s)

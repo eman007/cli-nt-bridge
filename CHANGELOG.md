@@ -8,6 +8,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **NT8 Guard 0.9.0 (beta)** - `guard/`: keeps NinjaTrader 8 running on its own. A relauncher and an
+  overwatch (per-user scheduled tasks, no admin rights) restart NinjaTrader and log in after a crash or
+  a freeze, reconnect dropped connections, put back strategies NinjaTrader dropped from its list (onto
+  their charts) from automatic backups, and alert your phone through ntfy. A WPF control panel with a
+  seven-step setup wizard, a fire drill that proves the recovery chain end to end, and
+  `NT8Guard-v0.9.0.zip` (installer, bundled Python 3.14 embeddable, the two NinjaTrader add-ons,
+  setup guide PDF). Built by `guard/build/Build-Release.ps1`, which refuses to produce a zip unless
+  every suite passes, a personal-strings scan is clean and the zip installs into a clean profile.
+- **`addon/AutoReconnect.cs` - the feed guard add-on (5.0.0)**: watches the market data of a watch
+  list, reconnects dropped connections, recovers a silent feed (re-subscribe, then disconnect and
+  reconnect the connection serving it - never with a position open on it), a CME holiday calendar by
+  rule, NinjaTrader's own rollover for `##-##` instruments, an events file and a heartbeat. Treats the
+  Simulated Data Feed as never closed.
+- **`ghostorders`** - find order lines stuck in a transitional state; `--cancel` cancels exactly those
+  orders, `--reset` resets a simulation account; both re-read the account and report what cleared.
+- `nt8bridge.frontmonth` (the front contract from the clock) and `nt8bridge.output` (shared JSON output).
+
+### Fixed
+
+- `ghostorders --cancel` no longer reports success it never verified.
+- The NT8 link acts on every strategy row when several share a name.
+
 - **`optimize`, `walkforward`, `multiobjective`: NinjaTrader's own parameter search on the
   Strategy Analyzer tab, with a headless runner's option syntax.**
 

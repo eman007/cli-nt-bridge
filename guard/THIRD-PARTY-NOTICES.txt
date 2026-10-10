@@ -1,0 +1,38 @@
+NT8 Guard - third-party notices
+================================
+
+NT8 Guard itself is MIT-licensed (LICENSE). It includes, unchanged, the following works by others.
+Each one's full licence text ships beside it, at the path given.
+
+1. Python (CPython) 3.14 - embeddable package
+   python\  (python.exe, python314.dll, python314.zip and their modules)
+   Copyright (c) 2001 Python Software Foundation; All Rights Reserved.
+   Licence: PSF License Agreement for Python, and the licences of the libraries CPython bundles
+   (bzip2, expat, libffi, OpenSSL, SQLite, xz, zlib and others).
+   Full text: python\LICENSE.txt
+
+2. segno - QR code generator (draws the phone-alert QR code)
+   python\vendor\segno\
+   Copyright (c) 2016 - 2024, Lars Heuer. All rights reserved.
+   Licence: BSD 3-Clause.
+   Full text: python\vendor\segno\LICENSE
+
+3. IBM Plex fonts (the control panel's type: Plex Sans, Sans Condensed, Mono)
+   app\panel\fonts\
+   Copyright (c) 2017 IBM Corp. with Reserved Font Name "Plex".
+   Licence: SIL Open Font License, Version 1.1.
+   Full text: app\panel\fonts\OFL.txt
+
+4. NT8BridgeServerPlayback.cs - part of the NT8 link add-on (Playback and Strategy Analyzer requests)
+   NT8Guard-AddOns.zip -> AddOns/NT8BridgeServerPlayback.cs
+   Copyright (c) 2026 Quantrosoft Pty. Ltd.
+   Licence: MIT. Full text: the notice at the top of that file.
+
+Credit, no code included
+------------------------
+The way the login helper (app\Guard-Login.ps1) finds NinjaTrader's login window and fills in the
+password follows the approach of the NinjaTraderAutoLogin project. None of its code is included;
+Guard's helper is its own PowerShell script and finds the password box with Windows UI Automation.
+
+NinjaTrader is a trademark of NinjaTrader, LLC. NT8 Guard is not made, endorsed or supported by
+NinjaTrader, LLC.

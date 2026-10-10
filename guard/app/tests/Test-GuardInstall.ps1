@@ -1,0 +1,83 @@
+# Install.cmd / Install-Guard.ps1 (spec 8): a fresh install, an update that keeps everything you set, and the
+# refusals. The installer runs in its own powershell.exe, as it does for a person, against a fake release
+# folder, a temp Guard home and a temp Start menu - never the real ones.
+. (Join-Path $PSScriptRoot 'TestKit.ps1')
+Import-GuardModules
+$h = Use-TestHomes 'install'
+$guardHome = $h.Home
+$menu = New-TestDir startmenu
+
+# A release folder as the zip unpacks: Install.cmd, app\, python\, the add-ons zip, the guide.
+$src = New-TestDir release
+Copy-Item -LiteralPath $script:AppDir -Destination (Join-Path $src 'app') -Recurse
+Copy-Item (Join-Path (Split-Path -Parent $script:AppDir) 'Install.cmd') $src
+New-Item -ItemType Directory (Join-Path $src 'python') | Out-Null
+[IO.File]::WriteAllText((Join-Path $src 'python\python.exe'), 'runtime')
+[IO.File]::WriteAllText((Join-Path $src 'python\backup_export.py'), 'tool')
+foreach ($f in 'NT8Guard-AddOns.zip', 'NT8 Guard - Setup Guide.pdf', 'NT8 Guard - Quick Start.png', 'LICENSE', 'THIRD-PARTY-NOTICES.txt') { [IO.File]::WriteAllText((Join-Path $src $f), $f) }
+[IO.File]::WriteAllText((Join-Path $src 'app\VERSION'), '0.9.0')
+# downloaded from the internet: Windows marks it (Mark-of-the-Web)
+Set-Content -LiteralPath (Join-Path $src 'app\Guard-Panel.ps1') -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
+
+function Install([string[]]$More = @()) {
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $src 'app\Install-Guard.ps1') -Source $src -GuardHome $guardHome -StartMenuDir $menu -NoLaunch @More 2>&1
+    return [pscustomobject]@{ Code = $LASTEXITCODE; Out = (@($out | ForEach-Object { "$_" }) -join "`n") }
+}
+function Marked([string]$Path) { [bool](Get-Item -LiteralPath $Path -Stream * -ErrorAction SilentlyContinue | Where-Object Stream -eq 'Zone.Identifier') }
+
+'--- a fresh install'
+Check 'the downloaded file is marked before the install' (Marked (Join-Path $src 'app\Guard-Panel.ps1')) ''
+$r = Install
+Check 'succeeds' ($r.Code -eq 0) $r.Out
+Check 'the program, the runtime, the add-ons zip and the guide are in Guard''s folder' (
+    (Test-Path (Join-Path $guardHome 'app\Guard-Panel.ps1')) -and (Test-Path (Join-Path $guardHome 'python\python.exe')) -and
+    (Test-Path (Join-Path $guardHome 'NT8Guard-AddOns.zip')) -and (Test-Path (Join-Path $guardHome 'NT8 Guard - Setup Guide.pdf')) -and
+    (Test-Path (Join-Path $guardHome 'NT8 Guard - Quick Start.png')) -and (Test-Path (Join-Path $guardHome 'THIRD-PARTY-NOTICES.txt'))) $r.Out
+Check 'every file unblocked' (-not (Marked (Join-Path $src 'app\Guard-Panel.ps1')) -and -not (Marked (Join-Path $guardHome 'app\Guard-Panel.ps1'))) ''
+$lnkPath = Join-Path $menu 'NT8 Guard.lnk'
+Check 'a Start-menu shortcut' (Test-Path $lnkPath) (@(Get-ChildItem $menu).Name -join ',')
+$lnk = (New-Object -ComObject WScript.Shell).CreateShortcut($lnkPath)
+Check 'it opens the panel without a console window' ($lnk.TargetPath -match 'wscript\.exe$' -and $lnk.Arguments -match [regex]::Escape((Join-Path $guardHome 'app\Guard-Run.vbs')) -and $lnk.Arguments -match 'Guard-Panel\.ps1') "$($lnk.TargetPath) $($lnk.Arguments)"
+Check 'from Guard''s app folder' ($lnk.WorkingDirectory -eq (Join-Path $guardHome 'app')) $lnk.WorkingDirectory
+Check 'and says what it did' ($r.Out -match '0\.9\.0' -and $r.Out -match [regex]::Escape($guardHome)) $r.Out
+$ver = & powershell.exe -NoProfile -Command "Import-Module '$(Join-Path $guardHome 'app\lib\Guard.Paths.psm1')'; Get-GuardVersion"
+Check 'the installed program knows its version' ("$ver".Trim() -eq '0.9.0') "$ver"
+
+'--- an update keeps everything you set'
+[IO.File]::WriteAllText((Join-Path $guardHome 'guard.json'), '{"python":{"exe":"C:\\mine\\python.exe"},"mine":true}')
+foreach ($p in 'secrets\nt8.cred', 'state\pause.json', 'logs\relaunch.log', 'events\panel.jsonl') {
+    $f = Join-Path $guardHome $p; New-Item -ItemType Directory (Split-Path $f) -Force | Out-Null; [IO.File]::WriteAllText($f, "kept $p")
+}
+[IO.File]::WriteAllText((Join-Path $guardHome 'app\gone-in-new-release.ps1'), 'old')
+[IO.File]::WriteAllText((Join-Path $src 'app\VERSION'), '0.9.1')
+New-Item -ItemType Directory (Join-Path $guardHome 'app.new') -Force | Out-Null; [IO.File]::WriteAllText((Join-Path $guardHome 'app.new\half.ps1'), 'x')
+New-Item -ItemType Directory (Join-Path $guardHome 'python.old') -Force | Out-Null; [IO.File]::WriteAllText((Join-Path $guardHome 'python.old\x'), 'x')
+$r = Install
+Check 'succeeds' ($r.Code -eq 0) $r.Out
+Check 'your settings untouched (your own Python too)' ((Read-AllText (Join-Path $guardHome 'guard.json')) -match 'mine') ''
+Check 'your password, pause, logs and events untouched' (@('secrets\nt8.cred', 'state\pause.json', 'logs\relaunch.log', 'events\panel.jsonl' | Where-Object { (Read-AllText (Join-Path $guardHome $_)) -eq "kept $_" }).Count -eq 4) ''
+Check 'the program replaced whole: the new version, and a file the release dropped is gone' (
+    (Read-AllText (Join-Path $guardHome 'app\VERSION')) -eq '0.9.1' -and -not (Test-Path (Join-Path $guardHome 'app\gone-in-new-release.ps1'))) ''
+Check 'no half-done copy left from an interrupted run' (-not (Test-Path (Join-Path $guardHome 'app.new')) -and -not (Test-Path (Join-Path $guardHome 'python.old')) -and
+                                                        -not (Test-Path (Join-Path $guardHome 'app.old')) -and -not (Test-Path (Join-Path $guardHome 'python.new'))) (@(Get-ChildItem $guardHome).Name -join ',')
+
+'--- refused while it would get in the way'
+[IO.File]::WriteAllText((Join-Path $src 'app\VERSION'), '0.9.2')
+$panel = New-Object Threading.Mutex($true, 'Local\NT8GuardPanel')
+$r = Install
+$panel.ReleaseMutex(); $panel.Dispose()
+Check 'the control panel is open: refused, says to close it' ($r.Code -ne 0 -and $r.Out -match 'Close the NT8 Guard window') $r.Out
+Check 'and nothing changed' ((Read-AllText (Join-Path $guardHome 'app\VERSION')) -eq '0.9.1') ''
+$lock = Open-GuardStartLock $guardHome
+$r = Install
+$lock.Dispose()
+Check 'NinjaTrader being started: refused' ($r.Code -ne 0 -and $r.Out -match 'being started') $r.Out
+Check 'and nothing changed' ((Read-AllText (Join-Path $guardHome 'app\VERSION')) -eq '0.9.1') ''
+
+'--- Install.cmd run from inside the zip (not extracted)'
+$lone = New-TestDir lone
+Copy-Item (Join-Path $src 'Install.cmd') $lone
+$out = (& cmd.exe /c "echo.|`"$(Join-Path $lone 'Install.cmd')`"" 2>&1) -join "`n"
+Check 'says to extract the zip first' ($out -match 'Extract') $out
+
+Complete-Test

@@ -4,6 +4,12 @@ Drive **NinjaTrader 8** from the command line — deploy a NinjaScript strategy,
 
 Everything runs locally and in-process: a small Python CLI talks to a NinjaScript **AddOn** running inside NinjaTrader through plain JSON files. No UI automation, no network.
 
+> **New: NT8 Guard (beta, 0.9.0).** Keeps NinjaTrader 8 running on its own - starts it again and logs
+> in after a crash, restarts it when it freezes, brings a dead market-data feed back, puts back
+> strategies NinjaTrader dropped (onto their charts) - and tells your phone what it did. A Windows
+> installer with a setup wizard and a control panel; no command line needed. See [`guard/`](guard/README.md)
+> and the [Setup Guide (PDF)](guard/docs/guide/NT8%20Guard%20-%20Setup%20Guide.pdf).
+
 ## Why
 
 NinjaTrader's *offline* compilers can't see the errors that only surface when NinjaTrader itself loads and compiles your code (custom-indicator references, properties set from the wrong `State`, and so on). NT8 Bridge compiles **through NinjaTrader's own compiler** and hands you the real Roslyn diagnostics — so a fix-and-retry loop runs against ground truth. Then it drives the Strategy Analyzer for you and reads the performance back as data, exports the replay data your backtests need, and gives you an out-of-band read of live account/feed state that keeps working when your strategy's own status feed stalls.
@@ -251,6 +257,30 @@ Out-of-band recovery that works independently of whatever feed your strategy use
 
 - `feedhealth --instrument 'MNQ 09-26'` — reports each watched instrument's **last-tick age**, so a feed NinjaTrader still calls `connected` but whose ticks have stopped (a "dark" feed) is detectable. A tick older than a threshold is a frozen feed.
 - `feedwatch --instrument 'MNQ 09-26'` — a detect-only loop that alerts (durable jsonl + stdout) when a watched feed freezes past a grace period. Deliberately detect-only: thawing a frozen feed needs an operator to cycle NinjaTrader.
+
+### ghostorders - stuck order lines
+
+Finds **ghost orders** - order lines that stay on the chart because the order is wedged in a
+transitional state (`CancelPending`, `ChangePending` or `Initialized` for longer than
+`--stale-seconds`, default 2) - and clears them.
+
+```bash
+python -m nt8bridge ghostorders                              # which accounts are affected?
+python -m nt8bridge ghostorders --account Sim101 --cancel    # cancel exactly the stalled orders (preferred)
+python -m nt8bridge ghostorders --account Sim101 --reset     # last resort: reset that SIMULATION account
+python -m nt8bridge ghostorders --include-all                # every order, not just the flagged ones
+```
+
+`--cancel` calls `Account.Cancel()` on precisely the stalled orders - it reaches `CancelPending`,
+which `flatten` filters out and a simulation reset does not clear. An orphaned resting entry with no
+position is never cancelled by it: that judgement stays yours. Both remedies re-read the account
+afterwards and report `stillStalledAfter` / `cleared`; the exit code follows `cleared`: **0** cleared
+(or nothing found), **2** ghosts remain, **1** error or a refused request. `--reset` runs only when the
+account's provider **is** `Simulator` (an allowlist: funded accounts can report unnamed providers, so
+"not Live" would admit them); `--clear-trade-data` (off by default) also wipes that account's trade
+history. If nothing clears them: Control Center > Tools > Database Management > Reset DB, then restart
+NinjaTrader. An order time recorded in exchange time can make `ageSeconds` negative; such an order
+qualifies on its state alone and carries `clockSkew: true`.
 
 ### strategies — is it enabled, and is it actually running?
 

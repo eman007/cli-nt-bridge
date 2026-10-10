@@ -1,0 +1,825 @@
+<!--
+  NT8 Guard control panel. Loaded by Guard-Panel.ps1, which first pastes Theme.xaml in at THEME and
+  generates the repeated rows at PROTECTION_ROWS and PRIORITY_ROWS. Everything the code touches has an
+  x:Name; the lists (status cards, events, strategy backups) are ItemsControls fed PowerShell objects.
+  The screenshot mode lifts the root Grid out of the Window and gives it the Window's resources.
+-->
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="NT8 Guard" Width="1100" Height="760" MinWidth="900" MinHeight="620"
+        WindowStartupLocation="CenterScreen" Background="#0b0c0f" UseLayoutRounding="True">
+  <!-- the window and taskbar icon: a shield, drawn, so there is no image file to ship -->
+  <Window.Icon>
+    <DrawingImage>
+      <DrawingImage.Drawing>
+        <DrawingGroup>
+          <GeometryDrawing Brush="#0b0c0f" Geometry="M0,0 H32 V32 H0 Z"/>
+          <GeometryDrawing Brush="#9eaccb" Geometry="M16,3 L27,7 V15 C27,22 22,27 16,29 C10,27 5,22 5,15 V7 Z"/>
+          <GeometryDrawing Brush="#0b0c0f" Geometry="M14.5,19.5 L10.5,15.5 L12.3,13.7 L14.5,15.9 L19.7,10.7 L21.5,12.5 Z"/>
+        </DrawingGroup>
+      </DrawingImage.Drawing>
+    </DrawingImage>
+  </Window.Icon>
+  <Window.Resources>
+    <!--THEME-->
+    <!-- one status card; used by every row of the Status tab -->
+    <DataTemplate x:Key="CardTemplate">
+      <Border Style="{StaticResource Card}" Margin="6" Padding="0">
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="3"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+          <Border x:Name="Stripe" CornerRadius="9,0,0,9" Background="{StaticResource Live}"/>
+          <StackPanel Grid.Column="1" Margin="14,12,14,14">
+            <DockPanel>
+              <Ellipse x:Name="Dot" Width="8" Height="8" Fill="{StaticResource Live}" Margin="0,0,8,0" VerticalAlignment="Center"/>
+              <TextBlock Text="{Binding Title}" FontFamily="{StaticResource Display}" FontWeight="SemiBold" FontSize="12.5" Foreground="{StaticResource Muted}"/>
+            </DockPanel>
+            <TextBlock x:Name="Head" Text="{Binding Headline}" FontFamily="{StaticResource Display}" FontWeight="SemiBold" FontSize="18"
+                       Foreground="{StaticResource FgStrong}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+            <TextBlock Text="{Binding Detail}" FontSize="12.5" TextWrapping="Wrap" Margin="0,4,0,0"/>
+            <TextBlock x:Name="Remedy" Text="{Binding Remedy}" FontSize="12.5" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="{StaticResource Warn}"/>
+          </StackPanel>
+        </Grid>
+      </Border>
+      <DataTemplate.Triggers>
+        <DataTrigger Binding="{Binding State}" Value="warn">
+          <Setter TargetName="Stripe" Property="Background" Value="{StaticResource Warn}"/>
+          <Setter TargetName="Dot" Property="Fill" Value="{StaticResource Warn}"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding State}" Value="bad">
+          <Setter TargetName="Stripe" Property="Background" Value="{StaticResource Danger}"/>
+          <Setter TargetName="Dot" Property="Fill" Value="{StaticResource Danger}"/>
+          <Setter TargetName="Remedy" Property="Foreground" Value="{StaticResource Danger}"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding State}" Value="idle">
+          <Setter TargetName="Stripe" Property="Background" Value="{StaticResource Line2}"/>
+          <Setter TargetName="Dot" Property="Fill" Value="{StaticResource Muted}"/>
+          <Setter TargetName="Head" Property="Foreground" Value="{StaticResource Fg}"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding State}" Value="off">
+          <Setter TargetName="Stripe" Property="Background" Value="{StaticResource Line2}"/>
+          <Setter TargetName="Dot" Property="Fill" Value="{StaticResource Muted}"/>
+          <Setter TargetName="Head" Property="Foreground" Value="{StaticResource Fg}"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Remedy}" Value="">
+          <Setter TargetName="Remedy" Property="Visibility" Value="Collapsed"/>
+        </DataTrigger>
+      </DataTemplate.Triggers>
+    </DataTemplate>
+  </Window.Resources>
+  <Grid x:Name="Root" Background="{StaticResource Bg}" TextElement.FontFamily="{StaticResource Body}"
+        TextElement.FontSize="13" TextElement.Foreground="{StaticResource Fg}" TextOptions.TextFormattingMode="Display">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>   <!-- header -->
+      <RowDefinition Height="Auto"/>   <!-- banners -->
+      <RowDefinition Height="Auto"/>   <!-- the setup wizard's step bar -->
+      <RowDefinition Height="*"/>      <!-- the tabs -->
+      <RowDefinition Height="Auto"/>   <!-- the setup wizard's Back / Next -->
+      <RowDefinition Height="Auto"/>   <!-- footer -->
+    </Grid.RowDefinitions>
+
+    <!-- header: brand + overall health -->
+    <Border Grid.Row="0" Background="{StaticResource Surface}" Padding="24,14,24,12">
+      <DockPanel>
+        <Border x:Name="OverallPill" DockPanel.Dock="Right" Style="{StaticResource Pill}" Padding="14,4,14,5">
+          <StackPanel Orientation="Horizontal">
+            <Ellipse x:Name="OverallDot" Width="8" Height="8" Fill="{StaticResource Live}" Margin="0,1,8,0" VerticalAlignment="Center"/>
+            <TextBlock x:Name="OverallText" Text="READING" FontFamily="{StaticResource Display}" FontWeight="SemiBold" FontSize="14" Foreground="{StaticResource Live}"/>
+          </StackPanel>
+        </Border>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBlock Text="NT8 GUARD" Style="{StaticResource H1}"/>
+          <TextBlock Text="keeps NinjaTrader running" Foreground="{StaticResource Muted}" FontSize="13" VerticalAlignment="Bottom" Margin="14,0,0,4"/>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <StackPanel Grid.Row="1">
+      <!-- settings problems and old switch files -->
+      <Border x:Name="Banner" Visibility="Collapsed" Background="{StaticResource WarnSoft}" BorderBrush="{StaticResource Warn}" BorderThickness="0,1" Padding="24,8">
+        <ItemsControl x:Name="BannerItems">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate><TextBlock Text="{Binding}" Foreground="{StaticResource Warn}" TextWrapping="Wrap" Margin="0,2"/></DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </Border>
+      <!-- setup not finished yet -->
+      <Border x:Name="SetupBanner" Visibility="Collapsed" Background="{StaticResource AccentSoft}" BorderBrush="{StaticResource Accent}" BorderThickness="0,1" Padding="24,8">
+        <DockPanel>
+          <Button x:Name="SetupContinue" DockPanel.Dock="Right" Content="Continue setup" Style="{StaticResource BtnSmall}" Margin="12,0,0,0"/>
+          <TextBlock x:Name="SetupBannerText" Foreground="{StaticResource Accent}" VerticalAlignment="Center" TextWrapping="Wrap"/>
+        </DockPanel>
+      </Border>
+    </StackPanel>
+
+    <!-- the setup wizard: which step, and a dot per step -->
+    <Border x:Name="WizardBar" Grid.Row="2" Visibility="Collapsed" Background="{StaticResource Surface}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="24,12,24,14">
+      <DockPanel>
+        <ItemsControl x:Name="WizardDots" DockPanel.Dock="Right" VerticalAlignment="Center">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate>
+              <Border x:Name="Dot" Width="28" Height="4" CornerRadius="2" Margin="4,0,0,0" Background="{StaticResource Line2}" ToolTip="{Binding Title}"/>
+              <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding State}" Value="done"><Setter TargetName="Dot" Property="Background" Value="{StaticResource Live}"/></DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="current"><Setter TargetName="Dot" Property="Background" Value="{StaticResource Accent}"/></DataTrigger>
+              </DataTemplate.Triggers>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <StackPanel>
+          <TextBlock x:Name="WizardStep" Style="{StaticResource H2}" Margin="0"/>
+          <TextBlock x:Name="WizardTitle" Style="{StaticResource H1}" FontSize="19" Margin="0,2,0,0"/>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <TabControl x:Name="Tabs" Grid.Row="3" Style="{StaticResource Tabs}">
+
+      <!-- ============================ STATUS ============================ -->
+      <TabItem Header="Status" x:Name="TabStatus">
+        <Grid Margin="18,14,18,0">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+          <DockPanel Grid.Row="0" Margin="6,0,6,6">
+            <StackPanel x:Name="PauseIdle" DockPanel.Dock="Right" Orientation="Horizontal">
+              <TextBlock Text="Pause Guard for" VerticalAlignment="Center" Foreground="{StaticResource Muted}" Margin="0,0,10,0"/>
+              <Button x:Name="Pause30" Content="30 min" Style="{StaticResource BtnSmall}" ToolTip="Neither watchdog acts until then. Ends by itself."/>
+              <Button x:Name="Pause120" Content="2 h" Style="{StaticResource BtnSmall}" ToolTip="Neither watchdog acts until then. Ends by itself."/>
+              <Button x:Name="Pause480" Content="8 h" Style="{StaticResource BtnSmall}" Margin="0" ToolTip="Neither watchdog acts until then. Ends by itself."/>
+            </StackPanel>
+            <StackPanel x:Name="PauseActive" DockPanel.Dock="Right" Orientation="Horizontal" Visibility="Collapsed">
+              <TextBlock x:Name="PauseText" Text="Paused" VerticalAlignment="Center" Foreground="{StaticResource Warn}" Margin="0,0,12,0"/>
+              <Button x:Name="Resume" Content="Resume now" Style="{StaticResource BtnPrimary}" Margin="0"/>
+            </StackPanel>
+            <TextBlock x:Name="Updated" Text="" FontFamily="{StaticResource Mono}" FontSize="12" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
+          </DockPanel>
+
+          <!-- rows of cards (Show-PanelCards cuts the list by the column count): a row is as tall as its tallest card -->
+          <ItemsControl x:Name="Cards" Grid.Row="1">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <ItemsControl ItemsSource="{Binding Cards}" ItemTemplate="{StaticResource CardTemplate}">
+                  <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate><UniformGrid Rows="1" Columns="{Binding Cols}"/></ItemsPanelTemplate>
+                  </ItemsControl.ItemsPanel>
+                </ItemsControl>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+
+          <DockPanel Grid.Row="2" Margin="6,14,6,6">
+            <Button x:Name="OpenLogs" DockPanel.Dock="Right" Content="Open logs folder" Style="{StaticResource BtnGhost}" Margin="0"/>
+            <TextBlock Text="RECENT EVENTS" Style="{StaticResource H2}" Margin="0" VerticalAlignment="Center"/>
+          </DockPanel>
+          <Border Grid.Row="3" Style="{StaticResource Card}" Margin="6,0,6,14" Padding="0">
+            <Grid>
+              <TextBlock x:Name="EventsEmpty" Text="Nothing has happened yet." Foreground="{StaticResource Muted}" Margin="16,14" Visibility="Collapsed"/>
+              <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,4">
+                <ItemsControl x:Name="Events">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <Grid Margin="16,5,16,5">
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="82"/>
+                          <ColumnDefinition Width="96"/>
+                          <ColumnDefinition Width="18"/>
+                          <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{Binding Time}" FontFamily="{StaticResource Mono}" FontSize="12" Foreground="{StaticResource Muted}"/>
+                        <TextBlock Grid.Column="1" Text="{Binding Source}" FontSize="12.5" Foreground="{StaticResource Muted}"/>
+                        <Ellipse x:Name="Sev" Grid.Column="2" Width="7" Height="7" Fill="{StaticResource Line2}" VerticalAlignment="Top" Margin="0,6,0,0"/>
+                        <TextBlock Grid.Column="3" Text="{Binding Text}" TextWrapping="Wrap"/>
+                      </Grid>
+                      <DataTemplate.Triggers>
+                        <DataTrigger Binding="{Binding Severity}" Value="warn"><Setter TargetName="Sev" Property="Fill" Value="{StaticResource Warn}"/></DataTrigger>
+                        <DataTrigger Binding="{Binding Severity}" Value="alert"><Setter TargetName="Sev" Property="Fill" Value="{StaticResource Danger}"/></DataTrigger>
+                      </DataTemplate.Triggers>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </ScrollViewer>
+            </Grid>
+          </Border>
+        </Grid>
+      </TabItem>
+
+      <!-- ============================ PROTECTION ============================ -->
+      <TabItem Header="Protection" x:Name="TabProtection">
+        <DockPanel>
+          <Border x:Name="ProtBar" DockPanel.Dock="Bottom" Background="{StaticResource Surface}" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="24,12">
+            <DockPanel>
+              <Button x:Name="ProtSave" Content="Save" Style="{StaticResource BtnPrimary}"/>
+              <Button x:Name="ProtRevert" Content="Undo changes" Style="{StaticResource BtnGhost}"/>
+              <TextBlock x:Name="ProtMsg" Style="{StaticResource Msg}"/>
+            </DockPanel>
+          </Border>
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="24,6,24,24" MaxWidth="980" HorizontalAlignment="Left">
+              <TextBlock Text="PRESET" Style="{StaticResource H2}"/>
+              <UniformGrid Columns="3">
+                <RadioButton x:Name="PresetWatch" GroupName="Preset" Style="{StaticResource PresetCard}">
+                  <StackPanel>
+                    <TextBlock Text="Watch only" FontFamily="{StaticResource Display}" FontWeight="SemiBold" FontSize="16" Foreground="{StaticResource FgStrong}"/>
+                    <TextBlock Text="Guard watches and alerts you. It never starts, restarts or reconnects anything." Style="{StaticResource Help}" Margin="0,4,0,0"/>
+                  </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="PresetRecover" GroupName="Preset" Style="{StaticResource PresetCard}">
+                  <StackPanel>
+                    <TextBlock Text="Recover NT8" FontFamily="{StaticResource Display}" FontWeight="SemiBold" FontSize="16" Foreground="{StaticResource FgStrong}"/>
+                    <TextBlock Text="Brings NinjaTrader, its connections and its strategies list back. Switching strategies on stays with you." Style="{StaticResource Help}" Margin="0,4,0,0"/>
+                  </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="PresetHandsoff" GroupName="Preset" Style="{StaticResource PresetCard}">
+                  <StackPanel>
+                    <TextBlock Text="Hands-off" FontFamily="{StaticResource Display}" FontWeight="SemiBold" FontSize="16" Foreground="{StaticResource FgStrong}"/>
+                    <TextBlock Text="Everything Recover does, plus switching strategies back on and closing an unprotected position first." Style="{StaticResource Help}" Margin="0,4,0,0"/>
+                  </StackPanel>
+                </RadioButton>
+              </UniformGrid>
+              <TextBlock x:Name="CustomNote" Style="{StaticResource Help}" Foreground="{StaticResource Accent}" Margin="2,10,0,0" Visibility="Collapsed"/>
+
+              <TextBlock Text="WHAT GUARD DOES BY ITSELF" Style="{StaticResource H2}" Margin="0,22,0,2"/>
+              <TextBlock Text="Off means Guard only alerts you and leaves it to you." Style="{StaticResource Help}" Margin="0,0,0,10"/>
+              <Border Style="{StaticResource Card}" Padding="0">
+                <StackPanel>
+                  <!--PROTECTION_ROWS-->
+                </StackPanel>
+              </Border>
+              <TextBlock Style="{StaticResource Help}" Margin="2,10,0,0"
+                         Text="With switching strategies back on but closing unprotected positions off, an account holding a position with no stop is not switched back on: Guard alerts you instead."/>
+            </StackPanel>
+          </ScrollViewer>
+        </DockPanel>
+      </TabItem>
+
+      <!-- ============================ ALERTS ============================ -->
+      <TabItem Header="Alerts" x:Name="TabAlerts">
+        <DockPanel>
+          <Border x:Name="AlertBar" DockPanel.Dock="Bottom" Background="{StaticResource Surface}" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="24,12">
+            <DockPanel>
+              <Button x:Name="AlertSave" Content="Save" Style="{StaticResource BtnPrimary}"/>
+              <Button x:Name="AlertTest" Content="Send a test" Style="{StaticResource Btn}" ToolTip="Sends through the settings on this page, from this PC, without saving them."/>
+              <Button x:Name="AlertRevert" Content="Undo changes" Style="{StaticResource BtnGhost}"/>
+              <TextBlock x:Name="AlertMsg" Style="{StaticResource Msg}"/>
+            </DockPanel>
+          </Border>
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <Grid Margin="24,6,24,24">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" MaxWidth="620"/>
+                <ColumnDefinition Width="24"/>
+                <ColumnDefinition Width="320"/>
+              </Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="PHONE (NTFY)" Style="{StaticResource H2}"/>
+                <TextBlock Text="Server" Style="{StaticResource Label}" Margin="0,0,0,5"/>
+                <TextBox x:Name="NtfyServer" Style="{StaticResource Input}"/>
+                <TextBlock Text="Private topic" Style="{StaticResource Label}"/>
+                <DockPanel>
+                  <Button x:Name="TopicNew" DockPanel.Dock="Right" Content="New topic" Style="{StaticResource Btn}" Margin="8,0,0,0"/>
+                  <Button x:Name="TopicShow" DockPanel.Dock="Right" Content="Show" Style="{StaticResource Btn}" Margin="8,0,0,0"/>
+                  <Grid>
+                    <TextBox x:Name="NtfyTopic" Style="{StaticResource Input}" FontFamily="{StaticResource Mono}" Visibility="Collapsed"/>
+                    <TextBox x:Name="NtfyTopicMasked" Style="{StaticResource Input}" IsReadOnly="True" Foreground="{StaticResource Muted}"/>
+                  </Grid>
+                </DockPanel>
+                <TextBlock Style="{StaticResource Help}" Margin="0,6,0,0"
+                           Text="Anyone who knows the topic can read your alerts and send you fake ones. Keep it private, like a password: Guard never writes it into its logs."/>
+
+                <TextBlock Text="HOW LOUD ON YOUR PHONE" Style="{StaticResource H2}" Margin="0,22,0,2"/>
+                <TextBlock Text="ntfy priority 1 (silent) to 5 (urgent, breaks through Do Not Disturb if you allow it in the app)." Style="{StaticResource Help}" Margin="0,0,0,8"/>
+                <!--PRIORITY_ROWS-->
+
+                <TextBlock Text="WEBHOOK (OPTIONAL)" Style="{StaticResource H2}" Margin="0,22,0,8"/>
+                <DockPanel>
+                  <Button x:Name="WebhookShow" DockPanel.Dock="Right" Content="Show" Style="{StaticResource Btn}" Margin="8,0,0,0"/>
+                  <Grid>
+                    <TextBox x:Name="Webhook" Style="{StaticResource Input}" Visibility="Collapsed"/>
+                    <TextBox x:Name="WebhookMasked" Style="{StaticResource Input}" IsReadOnly="True" Foreground="{StaticResource Muted}"/>
+                  </Grid>
+                </DockPanel>
+                <TextBlock Style="{StaticResource Help}" Margin="0,6,0,0"
+                           Text="Guard also posts every alert here as JSON (title, body, severity, host, utc). Leave empty for none. A webhook address usually carries its own key, so it stays hidden like the topic."/>
+              </StackPanel>
+
+              <Border Grid.Column="2" Style="{StaticResource Card}" VerticalAlignment="Top" Margin="0,40,0,0">
+                <StackPanel>
+                  <TextBlock Text="ON YOUR PHONE" Style="{StaticResource H2}" Margin="0,0,0,10"/>
+                  <TextBlock TextWrapping="Wrap" Text="1. Install the free ntfy app (Android or iPhone)."/>
+                  <TextBlock TextWrapping="Wrap" Margin="0,6,0,0" Text="2. Scan this code with the phone's camera, or add the topic in the app."/>
+                  <TextBlock TextWrapping="Wrap" Margin="0,6,0,0" Text="3. Save here, then Send a test."/>
+                  <Border Width="232" Height="232" Margin="0,16,0,0" CornerRadius="10" Background="{StaticResource Surface2}" HorizontalAlignment="Center">
+                    <Grid>
+                      <TextBlock x:Name="QrHint" Text="Hidden until you ask: the code holds the topic." Style="{StaticResource Help}" TextAlignment="Center" VerticalAlignment="Center" Margin="24"/>
+                      <Border x:Name="QrTile" Background="White" CornerRadius="8" Margin="8" Visibility="Collapsed">
+                        <Image x:Name="QrImage" Stretch="Uniform" RenderOptions.BitmapScalingMode="NearestNeighbor"/>
+                      </Border>
+                    </Grid>
+                  </Border>
+                  <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,12,0,0">
+                    <Button x:Name="QrShow" Content="Show code" Style="{StaticResource BtnSmall}"/>
+                    <Button x:Name="TopicCopy" Content="Copy address" Style="{StaticResource BtnSmall}" Margin="0"/>
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+            </Grid>
+          </ScrollViewer>
+        </DockPanel>
+      </TabItem>
+
+      <!-- ============================ STRATEGY BACKUPS ============================ -->
+      <TabItem Header="Strategy backups" x:Name="TabBackups">
+        <DockPanel Margin="24,14,24,14">
+          <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+              <Button x:Name="BackupSave" Content="Save now" Style="{StaticResource BtnPrimary}" ToolTip="Save every strategy's settings now (Guard also does it every 30 minutes while NinjaTrader runs)."/>
+              <Button x:Name="BackupFolder" Content="Open templates folder" Style="{StaticResource Btn}" Margin="0"/>
+            </StackPanel>
+            <StackPanel VerticalAlignment="Center">
+              <TextBlock x:Name="BackupSummary" FontSize="14" Foreground="{StaticResource FgStrong}"/>
+              <TextBlock x:Name="BackupMsg" Style="{StaticResource Help}" Margin="0,3,0,0"/>
+            </StackPanel>
+          </DockPanel>
+          <Border x:Name="BackupBanner" DockPanel.Dock="Top" Visibility="Collapsed" Background="{StaticResource WarnSoft}" BorderBrush="{StaticResource Warn}" BorderThickness="1" CornerRadius="8" Padding="14,10" Margin="0,0,0,10">
+            <DockPanel>
+              <Button x:Name="BackupPutBackAll" DockPanel.Dock="Right" Content="Put back all now" Style="{StaticResource BtnSmall}" Margin="12,0,0,0" VerticalAlignment="Center"
+                      ToolTip="Closes NinjaTrader (only when you are flat), puts every missing strategy back on its chart, and lets NinjaTrader start again."/>
+              <TextBlock x:Name="BackupBannerText" Foreground="{StaticResource Warn}" TextWrapping="Wrap" VerticalAlignment="Center"/>
+            </DockPanel>
+          </Border>
+          <Border Style="{StaticResource Card}" Padding="0">
+            <DockPanel>
+              <Grid DockPanel.Dock="Top" Margin="16,12,16,8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="2*"/><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="1.1*"/>
+                  <ColumnDefinition Width="1.8*"/><ColumnDefinition Width="0.8*"/><ColumnDefinition Width="1.1*"/><ColumnDefinition Width="190"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="STRATEGY" Style="{StaticResource H2}" Margin="0"/>
+                <TextBlock Grid.Column="1" Text="ACCOUNT" Style="{StaticResource H2}" Margin="0"/>
+                <TextBlock Grid.Column="2" Text="INSTRUMENT" Style="{StaticResource H2}" Margin="0"/>
+                <TextBlock Grid.Column="3" Text="CHART" Style="{StaticResource H2}" Margin="0"/>
+                <TextBlock Grid.Column="4" Text="SAVED" Style="{StaticResource H2}" Margin="0"/>
+                <TextBlock Grid.Column="5" Text="STATE" Style="{StaticResource H2}" Margin="0"/>
+              </Grid>
+              <Border DockPanel.Dock="Top" Height="1" Background="{StaticResource Line}"/>
+              <Grid>
+                <TextBlock x:Name="BackupEmpty" Margin="16,14" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Visibility="Collapsed"
+                           Text="No backup yet. Guard saves every strategy's settings every 30 minutes while NinjaTrader runs - or press Save now."/>
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                  <ItemsControl x:Name="BackupRows">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <Border BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="16,9">
+                          <Grid>
+                            <Grid.ColumnDefinitions>
+                              <ColumnDefinition Width="2*"/><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="1.1*"/>
+                              <ColumnDefinition Width="1.8*"/><ColumnDefinition Width="0.8*"/><ColumnDefinition Width="1.1*"/><ColumnDefinition Width="190"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Margin="0,0,10,0">
+                              <TextBlock Text="{Binding Name}" Foreground="{StaticResource FgStrong}" FontWeight="Medium" TextTrimming="CharacterEllipsis"/>
+                              <TextBlock Text="{Binding Strategy}" FontSize="11.5" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
+                            </StackPanel>
+                            <TextBlock Grid.Column="1" Text="{Binding Account}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <TextBlock Grid.Column="2" Text="{Binding Instrument}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <TextBlock Grid.Column="3" Text="{Binding Chart}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="{Binding Chart}"/>
+                            <TextBlock Grid.Column="4" Text="{Binding LastSaved}" FontFamily="{StaticResource Mono}" FontSize="12" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
+                            <Border x:Name="StatePill" Grid.Column="5" Style="{StaticResource Pill}" HorizontalAlignment="Left" Padding="9,1,9,2">
+                              <TextBlock x:Name="StateText" Text="{Binding StateText}" FontSize="12" Foreground="{StaticResource Live}"/>
+                            </Border>
+                            <StackPanel Grid.Column="6" Orientation="Horizontal" HorizontalAlignment="Right">
+                              <Button x:Name="PutBack" Content="Put back now" Tag="{Binding Name}" Style="{StaticResource BtnSmall}" Visibility="Collapsed"
+                                      ToolTip="Closes NinjaTrader (only when you are flat), puts this strategy back on its chart, and lets NinjaTrader start again."/>
+                              <Button x:Name="Forget" Content="Forget" Tag="{Binding Name}" Style="{StaticResource BtnSmall}" Margin="0" Visibility="Collapsed"
+                                      ToolTip="Drop this backup. Its template file stays in NinjaTrader's templates folder."/>
+                            </StackPanel>
+                          </Grid>
+                        </Border>
+                        <DataTemplate.Triggers>
+                          <DataTrigger Binding="{Binding State}" Value="missing">
+                            <Setter TargetName="StatePill" Property="Background" Value="{StaticResource WarnSoft}"/>
+                            <Setter TargetName="StatePill" Property="BorderBrush" Value="{StaticResource Warn}"/>
+                            <Setter TargetName="StateText" Property="Foreground" Value="{StaticResource Warn}"/>
+                            <Setter TargetName="PutBack" Property="Visibility" Value="Visible"/>
+                            <Setter TargetName="Forget" Property="Visibility" Value="Visible"/>
+                          </DataTrigger>
+                          <DataTrigger Binding="{Binding State}" Value="removed">
+                            <Setter TargetName="StatePill" Property="Background" Value="{StaticResource MutedSoft}"/>
+                            <Setter TargetName="StatePill" Property="BorderBrush" Value="{StaticResource Line2}"/>
+                            <Setter TargetName="StateText" Property="Foreground" Value="{StaticResource Muted}"/>
+                            <Setter TargetName="PutBack" Property="Visibility" Value="Visible"/>
+                            <Setter TargetName="PutBack" Property="Content" Value="Bring back"/>
+                            <Setter TargetName="PutBack" Property="ToolTip" Value="You removed it from NinjaTrader's list. Closes NinjaTrader (only when you are flat), brings it back on its chart, and lets NinjaTrader start again."/>
+                            <Setter TargetName="Forget" Property="Visibility" Value="Visible"/>
+                          </DataTrigger>
+                        </DataTemplate.Triggers>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </ScrollViewer>
+              </Grid>
+            </DockPanel>
+          </Border>
+        </DockPanel>
+      </TabItem>
+
+      <!-- ============================ WATCH LIST ============================ -->
+      <TabItem Header="Watch list" x:Name="TabWatch">
+        <DockPanel>
+          <Border x:Name="WatchBar" DockPanel.Dock="Bottom" Background="{StaticResource Surface}" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="24,12">
+            <DockPanel>
+              <Button x:Name="WatchSave" Content="Save" Style="{StaticResource BtnPrimary}"/>
+              <Button x:Name="WatchRevert" Content="Undo changes" Style="{StaticResource BtnGhost}"/>
+              <TextBlock x:Name="WatchMsg" Style="{StaticResource Msg}"/>
+            </DockPanel>
+          </Border>
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <Grid Margin="24,6,24,24">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" MaxWidth="560"/>
+                <ColumnDefinition Width="24"/>
+                <ColumnDefinition Width="360"/>
+              </Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="INSTRUMENTS TO WATCH" Style="{StaticResource H2}"/>
+                <TextBox x:Name="Instruments" Style="{StaticResource InputArea}" Height="120"/>
+                <TextBlock Style="{StaticResource Help}" Margin="0,6,0,0"
+                           Text="One per line, as NinjaTrader names them. ##-## means the current contract: NQ ##-## follows the roll by itself. Pick instruments your data connection always streams - a silent one reads as a dead feed."/>
+                <TextBlock Text="SILENT AFTER" Style="{StaticResource H2}" Margin="0,22,0,8"/>
+                <StackPanel Orientation="Horizontal">
+                  <TextBox x:Name="StaleSeconds" Style="{StaticResource Input}" Width="80"/>
+                  <TextBlock Text="seconds without a price (30 or more), while the market is open" VerticalAlignment="Center" Margin="10,0,0,0" Foreground="{StaticResource Muted}"/>
+                </StackPanel>
+                <TextBlock Text="EXTRA CLOSED DAYS" Style="{StaticResource H2}" Margin="0,22,0,8"/>
+                <TextBox x:Name="ExtraDates" Style="{StaticResource InputArea}" Height="96"/>
+                <TextBlock Style="{StaticResource Help}" Margin="0,6,0,0"
+                           Text="Guard already knows the CME holidays and early closes. Add a day it does not: 2026-11-27 (closed all day) or 2026-11-27 13:15 (closed from then, New York time)."/>
+              </StackPanel>
+              <Border Grid.Column="2" Style="{StaticResource Card}" VerticalAlignment="Top" Margin="0,40,0,0">
+                <StackPanel>
+                  <TextBlock Text="RIGHT NOW" Style="{StaticResource H2}" Margin="0,0,0,4"/>
+                  <TextBlock Text="what the feed guard inside NinjaTrader made of the list" Style="{StaticResource Help}" Margin="0,0,0,10"/>
+                  <TextBlock Text="Watching" Style="{StaticResource Label}" Margin="0,4,0,2"/>
+                  <TextBlock x:Name="WatchResolved" FontFamily="{StaticResource Mono}" TextWrapping="Wrap"/>
+                  <TextBlock Text="Data from" Style="{StaticResource Label}" Margin="0,10,0,2"/>
+                  <TextBlock x:Name="WatchProviders" TextWrapping="Wrap"/>
+                  <TextBlock Text="Next closure" Style="{StaticResource Label}" Margin="0,10,0,2"/>
+                  <TextBlock x:Name="WatchNext" TextWrapping="Wrap"/>
+                  <TextBlock x:Name="WatchNote" Style="{StaticResource Help}" Foreground="{StaticResource Warn}" Margin="0,12,0,0"/>
+                </StackPanel>
+              </Border>
+            </Grid>
+          </ScrollViewer>
+        </DockPanel>
+      </TabItem>
+
+      <!-- ============================ TOOLS ============================ -->
+      <TabItem Header="Tools" x:Name="TabTools">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="18,14,18,18" MaxWidth="1040" HorizontalAlignment="Left">
+            <UniformGrid Columns="2">
+              <Border Style="{StaticResource Card}" Margin="6">
+                <StackPanel>
+                  <TextBlock Text="TEST ALERT" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                  <TextBlock Style="{StaticResource Help}" Text="Sends a test to your phone through the saved settings, from this PC - the only proof that alerts get out of this machine."/>
+                  <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                    <Button x:Name="ToolTest" Content="Send a test" Style="{StaticResource Btn}"/>
+                  </StackPanel>
+                  <TextBlock x:Name="ToolTestMsg" Style="{StaticResource Msg}" Margin="0,8,0,0"/>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource Card}" Margin="6">
+                <StackPanel>
+                  <TextBlock Text="PAUSE" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                  <TextBlock Style="{StaticResource Help}" Text="Stops both watchdogs from acting - for maintenance, an update, or closing NinjaTrader on purpose. It always ends by itself (24 hours at most)."/>
+                  <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                    <Button x:Name="ToolPause30" Content="30 min" Style="{StaticResource Btn}"/>
+                    <Button x:Name="ToolPause120" Content="2 h" Style="{StaticResource Btn}"/>
+                    <Button x:Name="ToolPause480" Content="8 h" Style="{StaticResource Btn}"/>
+                    <Button x:Name="ToolResume" Content="Resume" Style="{StaticResource BtnPrimary}"/>
+                  </StackPanel>
+                  <TextBlock x:Name="ToolPauseMsg" Style="{StaticResource Msg}" Margin="0,8,0,0"/>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource Card}" Margin="6">
+                <StackPanel>
+                  <TextBlock Text="TEST LOGIN" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                  <TextBlock Style="{StaticResource Help}" Text="Starts NinjaTrader and logs in the way Guard does after a crash. If NinjaTrader is running it is closed first - only when you are flat (no position, no working order, no strategy running)."/>
+                  <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                    <Button x:Name="ToolTestLogin" Content="Test login" Style="{StaticResource Btn}"/>
+                  </StackPanel>
+                  <TextBlock x:Name="ToolLoginMsg" Style="{StaticResource Msg}" Margin="0,8,0,0"/>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource Card}" Margin="6">
+                <StackPanel>
+                  <TextBlock Text="FIRE DRILL" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                  <TextBlock Style="{StaticResource Help}" Text="Proves the whole chain while the market is open: the feed guard is made to believe the market data died, and must notice, reconnect and recover - with the phone alerts a real outage sends. About 3 minutes; only when you are flat."/>
+                  <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                    <Button x:Name="ToolDrill" Content="Run the fire drill" Style="{StaticResource Btn}"/>
+                  </StackPanel>
+                  <TextBlock x:Name="ToolDrillMsg" Style="{StaticResource Msg}" Margin="0,8,0,0"/>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource Card}" Margin="6">
+                <StackPanel>
+                  <TextBlock Text="DIAGNOSTICS FOR A BUG REPORT" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                  <TextBlock Style="{StaticResource Help}" Text="A zip of Guard's settings, logs and recent events, saved to your Desktop. The alert address, your Windows user name and the PC name are masked; your password and strategy settings are never included."/>
+                  <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                    <Button x:Name="ToolDiag" Content="Create the zip" Style="{StaticResource Btn}"/>
+                  </StackPanel>
+                  <TextBlock x:Name="ToolDiagMsg" Style="{StaticResource Msg}" Margin="0,8,0,0"/>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource Card}" Margin="6">
+                <StackPanel>
+                  <TextBlock Text="FOLDERS" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                  <TextBlock Style="{StaticResource Help}" Text="Where Guard keeps its settings, logs and backups, and NinjaTrader's own folder."/>
+                  <WrapPanel Margin="0,12,0,0">
+                    <Button x:Name="FolderGuard" Content="Guard" Style="{StaticResource Btn}"/>
+                    <Button x:Name="FolderLogs" Content="Logs" Style="{StaticResource Btn}"/>
+                    <Button x:Name="FolderNt8" Content="NinjaTrader" Style="{StaticResource Btn}"/>
+                  </WrapPanel>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource Card}" Margin="6">
+                <StackPanel>
+                  <TextBlock Text="SETUP" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                  <TextBlock Style="{StaticResource Help}" Text="Run the setup again, or go straight to one of its pages: this PC's checks, the NinjaTrader password and login program, the add-ons."/>
+                  <WrapPanel Margin="0,12,0,0">
+                    <Button x:Name="ToolSetup" Content="Run setup" Style="{StaticResource Btn}"/>
+                    <Button x:Name="ToolCheck" Content="Check this PC" Style="{StaticResource Btn}"/>
+                    <Button x:Name="ToolLogin" Content="NinjaTrader login" Style="{StaticResource Btn}"/>
+                    <Button x:Name="ToolAddons" Content="Add-ons" Style="{StaticResource Btn}"/>
+                  </WrapPanel>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource Card}" Margin="6">
+                <StackPanel>
+                  <TextBlock Text="UNINSTALL" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                  <TextBlock Style="{StaticResource Help}" Text="Removes Guard's tasks, its shortcut and its folder. NinjaTrader, its add-ons and your strategy backups are not touched - it says how to remove the add-ons."/>
+                  <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                    <Button x:Name="ToolUninstall" Content="Uninstall NT8 Guard" Style="{StaticResource BtnDanger}"/>
+                  </StackPanel>
+                  <TextBlock x:Name="ToolUninstallMsg" Style="{StaticResource Msg}" Margin="0,8,0,0"/>
+                </StackPanel>
+              </Border>
+            </UniformGrid>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- ===================== THE SETUP WIZARD'S OWN PAGES (no tab header) ===================== -->
+      <TabItem Header="Check" x:Name="TabCheck" Visibility="Collapsed">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="24,16,24,24" MaxWidth="860" HorizontalAlignment="Left">
+            <TextBlock Style="{StaticResource Help}" FontSize="13.5" Text="Guard looks at this PC first. Red needs fixing before Guard can do its job; amber is worth knowing."/>
+            <Border Style="{StaticResource Card}" Padding="0" Margin="0,14,0,0">
+              <ItemsControl x:Name="CheckRows">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <Border BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="18,12">
+                      <DockPanel>
+                        <Ellipse x:Name="Dot" DockPanel.Dock="Left" Width="10" Height="10" Margin="0,5,14,0" VerticalAlignment="Top" Fill="{StaticResource Live}"/>
+                        <StackPanel>
+                          <TextBlock Text="{Binding Title}" Foreground="{StaticResource FgStrong}" FontWeight="Medium"/>
+                          <TextBlock Text="{Binding Text}" Style="{StaticResource Help}" Margin="0,3,0,0"/>
+                        </StackPanel>
+                      </DockPanel>
+                    </Border>
+                    <DataTemplate.Triggers>
+                      <DataTrigger Binding="{Binding State}" Value="warn"><Setter TargetName="Dot" Property="Fill" Value="{StaticResource Warn}"/></DataTrigger>
+                      <DataTrigger Binding="{Binding State}" Value="bad"><Setter TargetName="Dot" Property="Fill" Value="{StaticResource Danger}"/></DataTrigger>
+                    </DataTemplate.Triggers>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </Border>
+            <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+              <Button x:Name="CheckAgain" Content="Check again" Style="{StaticResource Btn}"/>
+            </StackPanel>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <TabItem Header="NinjaTrader login" x:Name="TabLogin" Visibility="Collapsed">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="24,16,24,24" MaxWidth="780" HorizontalAlignment="Left">
+            <Border Style="{StaticResource Card}">
+              <StackPanel>
+                <TextBlock Text="1   IN NINJATRADER, ONCE" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                <TextBlock Style="{StaticResource Help}" FontSize="13" Text="In NinjaTrader's login window, tick Remember username. Guard enters only the password."/>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="2   HOW GUARD LOGS IN" Style="{StaticResource H2}" Margin="0,0,0,10"/>
+                <RadioButton x:Name="LoginBuiltin" GroupName="LoginHow" Style="{StaticResource PresetCard}" Margin="0,0,0,8">
+                  <StackPanel>
+                    <TextBlock Text="Guard's own login (recommended)" Foreground="{StaticResource FgStrong}" FontWeight="Medium"/>
+                    <TextBlock Style="{StaticResource Help}" Text="Guard starts NinjaTrader and enters the password saved below."/>
+                  </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="LoginOwn" GroupName="LoginHow" Style="{StaticResource PresetCard}">
+                  <StackPanel>
+                    <TextBlock Text="My own login program" Foreground="{StaticResource FgStrong}" FontWeight="Medium"/>
+                    <TextBlock Style="{StaticResource Help}" Text="A program of yours that starts NinjaTrader and logs in. Guard runs it instead of its own login."/>
+                  </StackPanel>
+                </RadioButton>
+                <DockPanel x:Name="LoginOwnRow" Margin="0,10,0,0">
+                  <Button x:Name="LoginBrowse" DockPanel.Dock="Right" Content="Choose..." Style="{StaticResource Btn}" Margin="8,0,0,0"/>
+                  <TextBox x:Name="LoginProgram" Style="{StaticResource Input}"/>
+                </DockPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                  <Button x:Name="LoginSave" Content="Save" Style="{StaticResource BtnPrimary}"/>
+                  <TextBlock x:Name="LoginMsg" Style="{StaticResource Msg}"/>
+                </StackPanel>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="3   YOUR NINJATRADER PASSWORD" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                <TextBlock Style="{StaticResource Help}" Text="Encrypted for this Windows user on this PC only - nobody else, and no other PC, can read it. Never shown, never logged."/>
+                <TextBlock x:Name="LoginPasswordState" Margin="0,10,0,0"/>
+                <DockPanel Margin="0,8,0,0">
+                  <Button x:Name="LoginSavePassword" DockPanel.Dock="Right" Content="Save password" Style="{StaticResource Btn}" Margin="8,0,0,0"/>
+                  <PasswordBox x:Name="LoginPassword" Style="{StaticResource PasswordInput}"/>
+                </DockPanel>
+                <TextBlock x:Name="LoginPasswordMsg" Style="{StaticResource Msg}" Margin="0,8,0,0"/>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="4   TEST IT (OPTIONAL)" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                <TextBlock Style="{StaticResource Help}" Text="Starts NinjaTrader and logs in, the way Guard does after a crash - when NinjaTrader is closed, or open and flat (it is closed first)."/>
+                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                  <Button x:Name="LoginTest" Content="Test login" Style="{StaticResource Btn}"/>
+                </StackPanel>
+                <TextBlock x:Name="LoginTestMsg" Style="{StaticResource Msg}" Margin="0,8,0,0"/>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <TabItem Header="NinjaTrader add-ons" x:Name="TabAddons" Visibility="Collapsed">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="24,16,24,24" MaxWidth="860" HorizontalAlignment="Left">
+            <Border Style="{StaticResource Card}">
+              <StackPanel>
+                <TextBlock Text="IMPORT THEM INTO NINJATRADER" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                <TextBlock Style="{StaticResource Help}" FontSize="13" Text="In NinjaTrader: Tools > Import > NinjaScript Add-On, and choose the file below. NinjaTrader compiles them, which restarts running strategies - import while you are flat."/>
+                <TextBlock x:Name="AddonsZip" FontFamily="{StaticResource Mono}" FontSize="12" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                  <Button x:Name="AddonsShowZip" Content="Show the file" Style="{StaticResource Btn}"/>
+                  <Button x:Name="AddonsCopyPath" Content="Copy its path" Style="{StaticResource Btn}"/>
+                </StackPanel>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="THEIR FIRST REPORT" Style="{StaticResource H2}" Margin="0,0,0,10"/>
+                <DockPanel Margin="0,4">
+                  <Ellipse x:Name="AddonFeedDot" Width="10" Height="10" Margin="0,0,12,0" Fill="{StaticResource Line2}"/>
+                  <TextBlock x:Name="AddonFeedText" TextWrapping="Wrap"/>
+                </DockPanel>
+                <DockPanel Margin="0,4">
+                  <Ellipse x:Name="AddonLinkDot" Width="10" Height="10" Margin="0,0,12,0" Fill="{StaticResource Line2}"/>
+                  <TextBlock x:Name="AddonLinkText" TextWrapping="Wrap"/>
+                </DockPanel>
+                <TextBlock x:Name="AddonsNote" Style="{StaticResource Help}" Margin="0,10,0,0"/>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <TabItem Header="Done" x:Name="TabDone" Visibility="Collapsed">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="24,16,24,24" MaxWidth="860" HorizontalAlignment="Left">
+            <Border Style="{StaticResource Card}">
+              <StackPanel>
+                <TextBlock Text="START GUARD" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                <TextBlock Style="{StaticResource Help}" FontSize="13" Text="Installs Guard's three scheduled tasks for your Windows user - no administrator rights needed - and proves each one runs, then sends a test alert if you set alerts up. From then on Guard watches NinjaTrader, and starts it when it is down."/>
+                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                  <Button x:Name="DoneFinish" Content="Finish setup" Style="{StaticResource BtnPrimary}"/>
+                </StackPanel>
+                <TextBlock x:Name="DoneMsg" Style="{StaticResource Msg}" Margin="0,8,0,0"/>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="THEN: THE FIRE DRILL" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                <TextBlock Style="{StaticResource Help}" FontSize="13" Text="While the market is open and you are flat, the fire drill proves the whole chain: the feed guard is made to believe the market data died and must recover it, with the phone alerts a real outage sends. About 3 minutes."/>
+                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                  <Button x:Name="DoneDrill" Content="Run the fire drill" Style="{StaticResource Btn}"/>
+                  <Button x:Name="DoneStatus" Content="Open Status" Style="{StaticResource Btn}"/>
+                </StackPanel>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+    </TabControl>
+
+    <!-- the setup wizard: Back / Next -->
+    <Border x:Name="WizardNav" Grid.Row="4" Visibility="Collapsed" Background="{StaticResource Surface}" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="24,12">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+          <Button x:Name="WizardSkip" Content="Skip this step" Style="{StaticResource BtnGhost}"/>
+          <Button x:Name="WizardNext" Content="Next" Style="{StaticResource BtnPrimary}" Margin="0"/>
+        </StackPanel>
+        <Button x:Name="WizardBack" DockPanel.Dock="Left" Content="Back" Style="{StaticResource Btn}"/>
+        <Button x:Name="WizardLater" DockPanel.Dock="Left" Content="Finish later" Style="{StaticResource BtnGhost}"/>
+        <TextBlock x:Name="WizardMsg" Style="{StaticResource Msg}"/>
+      </DockPanel>
+    </Border>
+
+    <!-- footer: what the panel is doing -->
+    <Border x:Name="FooterBar" Grid.Row="5" Visibility="Collapsed" Background="{StaticResource Surface}" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="24,6">
+      <DockPanel>
+        <TextBlock x:Name="FooterRight" DockPanel.Dock="Right" FontFamily="{StaticResource Mono}" FontSize="11.5" Foreground="{StaticResource Muted}"/>
+        <TextBlock x:Name="Footer" FontSize="12" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
+      </DockPanel>
+    </Border>
+
+    <!-- a question in the window itself (no light-themed message box) -->
+    <Grid x:Name="Overlay" Grid.RowSpan="6" Background="{StaticResource Scrim}" Visibility="Collapsed">
+      <Border Style="{StaticResource Card}" Width="480" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
+        <StackPanel>
+          <TextBlock x:Name="OverlayTitle" Style="{StaticResource H1}" FontSize="19" TextWrapping="Wrap"/>
+          <TextBlock x:Name="OverlayText" TextWrapping="Wrap" Margin="0,12,0,0"/>
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,22,0,0">
+            <Button x:Name="OverlayCancel" Content="Cancel" Style="{StaticResource BtnGhost}"/>
+            <Button x:Name="OverlayOk" Content="OK" Style="{StaticResource BtnPrimary}" Margin="0"/>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <!-- a button that touches NinjaTrader, running: its steps as they happen, then the result -->
+    <Grid x:Name="ActionOverlay" Grid.RowSpan="6" Background="{StaticResource Scrim}" Visibility="Collapsed">
+      <Border Style="{StaticResource Card}" Width="580" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
+        <StackPanel>
+          <TextBlock x:Name="ActionTitle" Style="{StaticResource H1}" FontSize="19" TextWrapping="Wrap"/>
+          <ItemsControl x:Name="ActionSteps" Margin="0,16,0,0">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <DockPanel Margin="0,5">
+                  <Border x:Name="Mark" DockPanel.Dock="Left" Width="20" Height="20" CornerRadius="10" BorderThickness="1.5"
+                          BorderBrush="{StaticResource Line2}" Background="Transparent" Margin="0,0,12,0" VerticalAlignment="Top">
+                    <Path x:Name="Icon" Stroke="{StaticResource Bg}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                          Width="18" Height="18" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                  </Border>
+                  <StackPanel>
+                    <TextBlock x:Name="StepText" Text="{Binding Text}" Foreground="{StaticResource Muted}" FontSize="13.5"/>
+                    <TextBlock x:Name="StepDetail" Text="{Binding Detail}" Style="{StaticResource Help}" Margin="0,2,0,0"/>
+                  </StackPanel>
+                </DockPanel>
+                <DataTemplate.Triggers>
+                  <DataTrigger Binding="{Binding State}" Value="running">
+                    <Setter TargetName="Mark" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                    <Setter TargetName="Icon" Property="Stroke" Value="{StaticResource Accent}"/>
+                    <Setter TargetName="Icon" Property="Data" Value="M8,9 L10,9"/>
+                    <Setter TargetName="StepText" Property="Foreground" Value="{StaticResource FgStrong}"/>
+                  </DataTrigger>
+                  <DataTrigger Binding="{Binding State}" Value="ok">
+                    <Setter TargetName="Mark" Property="BorderBrush" Value="{StaticResource Live}"/>
+                    <Setter TargetName="Mark" Property="Background" Value="{StaticResource Live}"/>
+                    <Setter TargetName="Icon" Property="Data" Value="M5,9 L8,12 L13,6"/>
+                    <Setter TargetName="StepText" Property="Foreground" Value="{StaticResource FgStrong}"/>
+                  </DataTrigger>
+                  <DataTrigger Binding="{Binding State}" Value="failed">
+                    <Setter TargetName="Mark" Property="BorderBrush" Value="{StaticResource Danger}"/>
+                    <Setter TargetName="Mark" Property="Background" Value="{StaticResource Danger}"/>
+                    <Setter TargetName="Icon" Property="Data" Value="M6,6 L12,12 M12,6 L6,12"/>
+                    <Setter TargetName="StepText" Property="Foreground" Value="{StaticResource Danger}"/>
+                  </DataTrigger>
+                  <DataTrigger Binding="{Binding State}" Value="skipped">
+                    <Setter TargetName="Icon" Property="Stroke" Value="{StaticResource Muted}"/>
+                    <Setter TargetName="Icon" Property="Data" Value="M6,9 L12,9"/>
+                  </DataTrigger>
+                  <DataTrigger Binding="{Binding Detail}" Value="">
+                    <Setter TargetName="StepDetail" Property="Visibility" Value="Collapsed"/>
+                  </DataTrigger>
+                </DataTemplate.Triggers>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+          <TextBlock x:Name="ActionResult" TextWrapping="Wrap" Margin="0,16,0,0"/>
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+            <Button x:Name="ActionClose" Content="Close" Style="{StaticResource BtnPrimary}" Margin="0" IsEnabled="False"/>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Grid>
+  </Grid>
+</Window>

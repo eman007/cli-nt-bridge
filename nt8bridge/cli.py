@@ -22,6 +22,7 @@ from nt8bridge import screenshot as ntscreenshot
 from nt8bridge import ntstatus as ntntstatus
 from nt8bridge import workspace as ntworkspace
 from nt8bridge import strategies as ntstrategies
+from nt8bridge import ghostorders as ntghostorders
 from nt8bridge import reconnect as ntreconnect
 from nt8bridge import connwatch as ntconnwatch
 from nt8bridge import compile as ntcompile
@@ -35,6 +36,7 @@ from nt8bridge import report as ntreport
 from nt8bridge import sweep as ntsweep
 from nt8bridge import watchdog as ntwatchdog
 from nt8bridge import feedhealth as ntfeedhealth
+from nt8bridge import output as ntoutput
 from nt8bridge import feedwatch as ntfeedwatch
 from nt8bridge import performance as ntperformance
 from nt8bridge import perfwindow as ntperfwindow
@@ -59,7 +61,7 @@ Commands:
   python -m nt8bridge sweep    --config c.json --instruments 'MNQ 09-26,MES 09-26' --bars 'Minute:1,Minute:5'  backtest matrix (--pdf)
   python -m nt8bridge account  --name Sim101 read NT8 live state (positions/orders/PnL)
   python -m nt8bridge performance --name Sim101 [--from D --to D] account trade performance (PF/win%/DD; --pdf)
-  python -m nt8bridge perfwindow --name BSKELA... [--generate --from D --to D]  read prop commissions/fees from the Trade Performance window (server-side; --generate opens+builds it hands-off)
+  python -m nt8bridge perfwindow --name YourPropAccount [--generate --from D --to D]  read prop commissions/fees from the Trade Performance window (server-side; --generate opens+builds it hands-off)
   python -m nt8bridge peek                       read latest SA result + param read-back (no run)
   python -m nt8bridge probe                      dump tab/tabStrategyProperties/template props (discover names)
   python -m nt8bridge configure --config c.json  set instrument/dates/bar type/fill/params on the SA tab
@@ -73,6 +75,8 @@ Commands:
   python -m nt8bridge flatten  --name Sim101 force-close positions + cancel orders (kill switch)
   python -m nt8bridge watch    --name Sim101 auto-flatten NAKED positions (loop)
   python -m nt8bridge feedhealth --instrument 'MNQ 09-26' last-tick age (detect FROZEN feed)
+  python -m nt8bridge output --tab 1 --tail 50    read NT8's Output 1/2 (Print); --follow to stream
+  python -m nt8bridge output enable              start recording Print traffic (no NT8 reload)
   python -m nt8bridge feedwatch  --instrument 'MNQ 09-26' alert on a frozen-but-connected feed (loop)
   python -m nt8bridge connections                read connection status (live/dropped)
   python -m nt8bridge playback [--coverage | --instrument 'MNQ 09-26']  replay transport: clock, MOVING?, speed; .nrd coverage only on request (--coverage = every instrument, minutes; --instrument = that one)
@@ -80,6 +84,7 @@ Commands:
   python -m nt8bridge ntstatus                   is NT running the code on disk? (catches a stale DLL)
   python -m nt8bridge workspace                  charts + indicators + strategies AND their enabled state
   python -m nt8bridge strategies                 Control Center strategies: are they enabled? --enable to fix
+  python -m nt8bridge ghostorders                stuck yellow order lines; --cancel clears them (verified)
   python -m nt8bridge screenshot --title Conductor   capture a window as PNG (see the screen, don't relay it)
   python -m nt8bridge reconnect --name X         reconnect a dropped connection
   python -m nt8bridge connwatch --name X         auto-reconnect inadvertent drops (loop)
@@ -851,6 +856,66 @@ def _strategies(args) -> int:
     return 0
 
 
+def _ghostorders(args) -> int:
+    """Exit codes: 0 = no ghosts (or the reset cleared them), 1 = error/refused, 2 = ghosts remain.
+
+    A refused reset is 1, not 2: 2 means "the box has ghosts", 1 means "you asked for something I
+    would not do". Conflating them would let a refusal read as a mere detection.
+    """
+    # Validate here, not only in the module: fail before a trigger file is ever written, and make
+    # the refusal reachable by the CLI tests.
+    for flag in ("cancel", "reset"):
+        if getattr(args, flag) and not args.account:
+            print(json.dumps({"command": "ghostorders", "status": "error", "ok": False,
+                              "message": f"{flag} requires --account; it will never {flag} "
+                                         f"across every account"}, indent=2))
+            return 1
+    try:
+        payload = ntghostorders.run_ghostorders(
+            account=args.account, reset=args.reset,
+            clear_trade_data=args.clear_trade_data,
+            stale_seconds=args.stale_seconds, timeout=args.timeout,
+            include_all=args.include_all, cancel=args.cancel)
+    except ValueError as e:
+        print(json.dumps({"command": "ghostorders", "status": "error", "ok": False, "message": str(e)}, indent=2))
+        return 1
+    except TimeoutError as e:
+        print(json.dumps({"command": "ghostorders", "status": "timeout", "ok": False, "message": str(e)}, indent=2))
+        return 1
+
+    state = ntghostorders.parse_ghostorders_response(payload)
+    out = {"command": "ghostorders"}
+    out.update(payload)
+    affected = state.affected()
+    if affected:
+        out["affectedAccounts"] = [a["name"] for a in affected]
+    manual = state.needs_a_human()
+    if manual:
+        # No programmatic fix exists for these, so say so loudly rather than leaving a bare count.
+        out["needsAHuman"] = [a["name"] for a in manual]
+        out["needsAHumanHint"] = (
+            "Live accounts cannot be reset from here. Cancel externally, disconnect and reconnect "
+            "every connection, then if they persist: Control Center > Tools > Database Management > "
+            "Reset DB, and restart NinjaTrader.")
+    print(json.dumps(out, indent=2))
+
+    if not state.ok:
+        return 1
+
+    # ★ Exit on the VERIFIED outcome, never on "the call returned".
+    #   The old rule was `performed` -> 0, and `totalFrozen` was consulted only when no reset was
+    #   asked for. So on 2026-09-21 `--reset` exited 0 ("clean") with four ghosts still wedged, and
+    #   the next 80 minutes went to chasing the wrong cause. `cleared` comes from the AddOn
+    #   re-reading the account after acting; `totalFrozen` is the pre-action scan and cannot answer
+    #   this on its own.
+    action = state.cancel if state.cancel is not None else state.reset
+    if action is not None:
+        if action.get("reason"):
+            return 1                       # refused: you asked for something it would not do
+        return 0 if action.get("cleared") else 2
+    return 2 if state.total_frozen else 0
+
+
 def _screenshot(title: str | None, hwnd: int | None, out: str | None, timeout: float) -> int:
     try:
         payload = ntscreenshot.run_screenshot(title, hwnd, out, timeout=timeout)
@@ -889,6 +954,87 @@ def _connwatch(names: list, grace: float, interval: float, max_attempts: int, on
         print(json.dumps({"command": "connwatch", "status": "stopped", "message": str(e)}, indent=2))
         return 0
     print(json.dumps({"command": "connwatch", "ok": True, "connections": names, "events": events}, indent=2))
+    return 0
+
+
+def _output(args) -> int:
+    """Read (or toggle) the Output 1/2 tee. Reads come straight off the files — no NT8 round-trip."""
+    if args.action:
+        # Reject read options rather than silently ignoring them.
+        misused = [f for f in ("tail", "since", "grep") if getattr(args, f, None) is not None]
+        misused += [f for f in ("follow", "json") if getattr(args, f, False)]
+        if misused:
+            flags = ", ".join("--" + f for f in misused)
+            print(f"{flags} is a read option; drop it when using `output {args.action}`")
+            return 2
+        if args.action == "enable":
+            marker = ntoutput.enable()
+            print(json.dumps({"command": "output", "action": "enable", "ok": True,
+                              "marker": str(marker),
+                              "note": "live within ~1s (AddOn poll tick); no NT8 reload"}, indent=2))
+            return 0
+        if args.action == "disable":
+            was_on = ntoutput.disable()
+            print(json.dumps({"command": "output", "action": "disable", "ok": True,
+                              "wasEnabled": was_on,
+                              "note": "existing logs are kept and still readable"}, indent=2))
+            return 0
+        print(json.dumps({"command": "output", "action": "status", **ntoutput.status()}, indent=2))
+        return 0
+
+    try:
+        since = ntoutput.parse_since(args.since) if args.since else None
+    except ValueError as e:
+        print(str(e))
+        return 2
+
+    if args.follow:
+        return _output_follow(args)
+
+    # --since means "everything from then on"; only default the tail when nothing was asked.
+    tail = args.tail if args.tail is not None else (None if since else 100)
+    records, stats = ntoutput.read_records(tab=args.tab, tail=tail, since=since, grep=args.grep)
+
+    if args.json:
+        print(json.dumps({"command": "output", "tab": args.tab, "count": len(records),
+                          "missing": stats.missing, "malformed": stats.malformed,
+                          "records": records}, indent=2))
+        return 0
+
+    if stats.missing:
+        state = "on" if ntoutput.is_enabled() else "off"
+        print(f"no Output tab {args.tab} log yet - the tee is {state}")
+        if state == "off":
+            print("enable it with:  python -m nt8bridge output enable")
+        return 1
+
+    for line in ntoutput.render(records):
+        print(line)
+    # Never let a filtered/truncated read imply it saw everything.
+    notes = []
+    if stats.dropped:
+        notes.append(f"{stats.dropped} record(s) were dropped by the tee (queue overflow)")
+    if stats.malformed:
+        notes.append(f"{stats.malformed} unparseable line(s) skipped")
+    if notes:
+        print("-- " + "; ".join(notes) + " --")
+    return 0
+
+
+def _output_follow(args) -> int:
+    """Stream new records until Ctrl-C. Survives rotation (see output.follow)."""
+    print(f"[following Output tab {args.tab} - Ctrl-C to stop]")
+    if not ntoutput.is_enabled():
+        print("note: the tee is OFF, so nothing new will arrive until: python -m nt8bridge output enable")
+    try:
+        for rec in ntoutput.follow(tab=args.tab, grep=args.grep):
+            if args.json:
+                print(json.dumps(rec))
+            else:
+                for line in ntoutput.render([rec]):
+                    print(line)
+    except KeyboardInterrupt:
+        return 0
     return 0
 
 
@@ -1178,6 +1324,24 @@ def main(argv: list[str]) -> int:
     p_strat.add_argument("--strategy", metavar="FRAGMENT",
                          help="assert a strategy matching this fragment has state=Realtime (exit 2 if not)")
     p_strat.add_argument("--timeout", type=float, default=60.0)
+    p_ghost = sub.add_parser(
+        "ghostorders",
+        help="find stuck (ghost) orders; --cancel clears them (preferred), --reset resets a SIMULATION account")
+    p_ghost.add_argument("--account", help="limit to this account; REQUIRED for --reset")
+    p_ghost.add_argument("--cancel", action="store_true",
+                         help="CANCEL the stalled orders on --account (preferred over --reset: it "
+                              "reaches CancelPending, which flatten filters out and "
+                              "ResetSimulationAccount does not clear)")
+    p_ghost.add_argument("--reset", action="store_true",
+                         help="reset the named SIMULATION account to clear its ghosts (refused on any other provider)")
+    p_ghost.add_argument("--clear-trade-data", action="store_true",
+                         help="also wipe the account's trade history (the journal ingests sim fills - off by default)")
+    p_ghost.add_argument("--stale-seconds", type=int, default=2,
+                         help="how long a transitional order must sit before it counts as a ghost (default 2)")
+    p_ghost.add_argument("--include-all", action="store_true",
+                         help="also dump EVERY order per account (max 60), not just the flagged ones - "
+                              "for when a chart shows a line the ghost predicates do not explain")
+    p_ghost.add_argument("--timeout", type=float, default=45.0)
     p_recon = sub.add_parser("reconnect")
     p_recon.add_argument("--name", required=True, help="connection name to reconnect (REQUIRED)")
     p_recon.add_argument("--timeout", type=float, default=30.0)
@@ -1198,6 +1362,15 @@ def main(argv: list[str]) -> int:
     p_fw.add_argument("--realert", type=float, default=30.0, help="seconds between repeat alerts while a feed stays frozen")
     p_fw.add_argument("--max-age", type=float, default=10.0, help="seconds since last tick = frozen")
     p_fw.add_argument("--once", action="store_true", help="single scan (no loop) — for testing")
+    p_out = sub.add_parser("output", help="read NT8's Output 1/2 (Print) — tail, follow, grep")
+    p_out.add_argument("action", nargs="?", choices=("enable", "disable", "status"),
+                       help="omit to READ; enable/disable toggle the tee (no NT8 reload)")
+    p_out.add_argument("--tab", type=int, choices=(1, 2), default=1, help="Output tab (default 1)")
+    p_out.add_argument("--tail", type=int, default=None, help="last N records (default 100)")
+    p_out.add_argument("--follow", action="store_true", help="stream new records as they arrive")
+    p_out.add_argument("--since", help="ISO timestamp, HH:MM (UTC — NOT local), or 30s/10m/2h")
+    p_out.add_argument("--grep", help="regex over the message text (gap markers always shown)")
+    p_out.add_argument("--json", action="store_true", help="emit raw records instead of text")
     p_batch = sub.add_parser("batch")
     p_batch.add_argument("--batch", required=True)
     p_batch.add_argument("--timeout", type=float, default=120.0)
@@ -1312,10 +1485,14 @@ def main(argv: list[str]) -> int:
         return _workspace(args.strategy, args.timeout)
     if args.command == "strategies":
         return _strategies(args)
+    if args.command == "ghostorders":
+        return _ghostorders(args)
     if args.command == "reconnect":
         return _reconnect(args.name, args.timeout)
     if args.command == "connwatch":
         return _connwatch(args.name, args.grace, args.interval, args.max_attempts, args.once)
+    if args.command == "output":
+        return _output(args)
     if args.command == "feedhealth":
         return _feedhealth(args.instrument, args.max_age, args.timeout)
     if args.command == "feedwatch":

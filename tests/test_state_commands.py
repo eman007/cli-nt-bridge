@@ -147,9 +147,9 @@ def test_not_stale_when_the_running_code_is_newer_than_every_source():
         "processStartUtc": "2026-09-02T14:02:37Z",
         "dllOnDisk": {"builtUtc": "2026-09-03T03:15:04Z"},
         "runningAssembly": {"name": "0d46200ae29d4fc2b124b520081cbd4f",
-                            "location": r"C:\Users\x\Documents\NinjaTrader 8\tmp\0d46200ae29d4fc2b124b520081cbd4f.dll",
+                            "location": r"C:\Users\someone\Documents\NinjaTrader 8\tmp\0d46200ae29d4fc2b124b520081cbd4f.dll",
                             "builtUtc": "2026-09-03T03:15:03Z"},
-        "newestSource": {"path": r"C:\Users\x\Documents\NinjaTrader 8\bin\Custom\AddOns\NT8BridgeServer.cs",
+        "newestSource": {"path": r"C:\Users\someone\Documents\NinjaTrader 8\bin\Custom\AddOns\NT8BridgeServer.cs",
                          "modifiedUtc": "2026-09-03T03:14:40Z"},
         "sourcesNewerThanRunningCode": False,
     })
