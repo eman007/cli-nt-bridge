@@ -68,6 +68,7 @@ Reset @(); Set-Heartbeat @{ scheduledClosed = $true }
 $r = Drill
 Check 'the market is closed' ($r.Result -eq 'refused' -and $r.Message -match 'market is closed' -and -not (Test-Path $deafPath)) $r.Message
 Check 'and it names the weekend way: the Simulated Data Feed never closes' ($r.Message -match 'Simulated Data Feed') $r.Message
+Check 'and says to wait a few seconds after switching to it (deferred minor)' ($r.Message -match 'few seconds') $r.Message
 Reset @(); Set-Heartbeat @{ rung = 2 }
 $r = Drill
 Check 'a recovery is already running' ($r.Result -eq 'refused' -and $r.Message -match 'already recovering') $r.Message

@@ -452,8 +452,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                 {
                     _providersAt = now;     // which connection serves the watch list, for the heartbeat
                     _feedProvidersText = string.Join(",", ResolveFeedProviders());
-                    RefreshSimFeedOnly();
                 }
+                // Every tick (10 s), not once a minute: someone who just connected the Simulated Data Feed for
+                // a weekend fire drill should not wait a minute for the calendar to step aside.
+                if (_watchdogSubs.Count > 0) RefreshSimFeedOnly();
 
                 // live health (Status + PriceStatus) per connection; a fully-dropped one is ABSENT here
                 var liveHealth = new Dictionary<string, string>();

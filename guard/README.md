@@ -32,9 +32,13 @@ ship in the release as `NT8Guard-AddOns.zip`, for NinjaTrader's *Tools > Import 
 powershell -NoProfile -ExecutionPolicy Bypass -File guard\build\Build-Release.ps1
 ```
 
-It refuses to produce a zip unless every test suite passes, the add-ons compile, the bundled Python
+It refuses to produce a zip unless `guard\` and `addon\` hold no uncommitted change (the zip is that
+commit, named in its `README.txt`), every test suite passes, the add-ons compile, the bundled Python
 matches its pinned SHA-256 and is signed by the Python Software Foundation, a scan finds no personal
-strings, and the finished zip installs into a clean temporary profile.
+strings, and the finished zip installs into a clean temporary profile. It writes
+`guard\build\release\NT8Guard-v<version>.zip`, `<name>.BUILD.txt` (commit, date, Python pin) and
+`SHA256SUMS.txt` (every zip in that folder). `-SkipSuites` and `-AllowDirty` exist for trying the packaging
+itself and name the zip `-untested` / `-dirty`.
 
 ## Licence
 

@@ -152,4 +152,35 @@ Remove-Item (Join-Path $inst 'leak.ps1')
 $p = @(Test-GuardInstalledTree -Root $inst -Forbidden @('C:\Fake\Repo'))
 Check 'and so is one that names it JSON-escaped (final review C1)' ($p.Count -eq 1 -and $p[0] -match 'session\.json') ($p -join '; ')
 
+'--- the fresh-install gate''s clean machine (deferred minors)'
+$w = New-TestDir cleanenv
+$before = @{ Path = $env:PATH; Nt8 = $env:NT8_DIR; Home = $env:NT8GUARD_HOME }
+$inside = Invoke-GuardCleanEnv -Work $w -GuardHome (Join-Path $w 'home') -Script { [pscustomobject]@{ Path = $env:PATH; Nt8 = $env:NT8_DIR; Home = $env:NT8GUARD_HOME } }
+Check 'no Python and no repository on PATH' ($inside.Path -notmatch 'python|\.venv|Coding') $inside.Path
+Check 'its own empty NinjaTrader folder, not this PC''s' ($inside.Nt8 -like "$w*" -and (Test-Path $inside.Nt8) -and -not @(Get-ChildItem $inside.Nt8 -Force).Count) $inside.Nt8
+Check 'and everything put back afterwards' ($env:PATH -eq $before.Path -and $env:NT8_DIR -eq $before.Nt8 -and $env:NT8GUARD_HOME -eq $before.Home) ''
+$q = Join-Path (New-TestDir quote) "O'Brien home"
+New-Item -ItemType Directory (Join-Path $q 'app\lib') -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $q 'app\lib\Guard.Setup.psm1'), "function Get-GuardSetupCheck { param(`$Nt8Version, `$AutoLogon, `$ScalePercent, `$OtherWatchdogs) [pscustomobject]@{ Key = 'python'; State = 'ok'; Text = 'Found (bundled).' } }`r`nExport-ModuleMember -Function Get-GuardSetupCheck")
+$row = Get-GuardInstalledPythonRow -GuardHome $q
+Check 'a Guard folder whose path holds an apostrophe still reads the wizard''s Python row' ($row -eq 'ok Found (bundled).') $row
+
+'--- every zip in the release folder keeps its line in SHA256SUMS.txt (deferred minor)'
+$rd = New-TestDir sums
+foreach ($n in 'NT8Guard-v9.9.9.zip', 'NT8Guard-v9.9.9-untested.zip') { [IO.File]::WriteAllText((Join-Path $rd $n), $n) }
+Write-GuardSums -Dir $rd | Out-Null
+$lines = @(Get-Content (Join-Path $rd 'SHA256SUMS.txt'))
+$want = @('NT8Guard-v9.9.9.zip', 'NT8Guard-v9.9.9-untested.zip' | ForEach-Object { "$((Get-FileHash (Join-Path $rd $_) -Algorithm SHA256).Hash.ToLowerInvariant())  $_" })
+Check 'one line per zip, both kept' ($lines.Count -eq 2 -and -not @($want | Where-Object { $lines -notcontains $_ }).Count) ($lines -join ' | ')
+
+'--- the committed guide PDF and Quick Start match their sources (deferred minor)'
+$stampFile = Join-Path $guideDir 'rendered-from.txt'
+$now = Get-GuardGuideStamp -SourceDir $guideDir
+Check 'rendered from exactly the committed HTML and screenshots' ((Test-Path $stampFile) -and (Read-AllText $stampFile).Trim() -eq $now) "stamp $(Read-AllText $stampFile) vs sources $now"
+Check 'the guide says what to do when a PC''s policy blocks scripts' ($guide -match 'execution policy') ''
+# A clone with core.autocrlf checks the HTML out with CRLF: the same sources, so the same stamp.
+$crlf = Join-Path (New-TestDir crlf) 'guide'; Copy-Item $guideDir $crlf -Recurse
+foreach ($h in Get-ChildItem $crlf -Filter *.html) { $t = [IO.File]::ReadAllText($h.FullName).Replace("`r`n", "`n").Replace("`n", "`r`n"); [IO.File]::WriteAllText($h.FullName, $t, (New-Object Text.UTF8Encoding($false))) }
+Check 'line endings do not make the committed guide look stale' ((Get-GuardGuideStamp -SourceDir $crlf) -eq $now) ''
+
 Complete-Test

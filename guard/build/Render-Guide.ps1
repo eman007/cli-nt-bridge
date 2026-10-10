@@ -58,6 +58,9 @@ try {
     $img = [Drawing.Image]::FromFile($png)
     try { $size = "$($img.Width)x$($img.Height)" } finally { $img.Dispose() }
     if ($size -ne '1920x1080') { throw "the Quick Start PNG is $size, not 1920x1080" }
+    # What these were rendered from, so a stale committed copy is caught (Test-GuardRelease).
+    Import-Module (Join-Path $PSScriptRoot 'Guard.Release.psm1') -DisableNameChecking
+    [IO.File]::WriteAllText((Join-Path $OutDir 'rendered-from.txt'), (Get-GuardGuideStamp -SourceDir $SourceDir -ShotsDir $ShotsDir) + "`n")
     "rendered $pdf ($([math]::Round($bytes.Length / 1KB)) KB)"
     "rendered $png ($size)"
 } finally {

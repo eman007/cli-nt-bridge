@@ -233,6 +233,67 @@ function Test-GuardInstalledTree {
     return $out.ToArray()
 }
 
+function Invoke-GuardCleanEnv {
+    # Run -Script on a "clean machine": Windows and PowerShell on PATH (no Python, no repository), Guard's
+    # home at -GuardHome, and an empty NinjaTrader folder of its own under -Work - so nothing reads this
+    # PC's real NinjaTrader. PATH, NT8_DIR and NT8GUARD_HOME are put back however -Script ends.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Work, [Parameter(Mandatory)][string]$GuardHome, [Parameter(Mandatory)][scriptblock]$Script)
+    $saved = @{ PATH = $env:PATH; NT8_DIR = $env:NT8_DIR; NT8GUARD_HOME = $env:NT8GUARD_HOME }
+    $nt8 = Join-Path $Work 'NinjaTrader 8 (empty)'
+    New-Item -ItemType Directory -Path $nt8 -Force | Out-Null
+    try {
+        $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+        $env:NT8_DIR = $nt8
+        $env:NT8GUARD_HOME = $GuardHome
+        & $Script
+    } finally {
+        foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
+    }
+}
+
+function Get-GuardInstalledPythonRow {
+    # The installed wizard's "Guard's Python" row, as "<state> <text>", read in its own PowerShell from the
+    # INSTALLED modules. The command goes over -EncodedCommand, so no path (an apostrophe in a user name)
+    # can break its quoting.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$GuardHome)
+    $module = (Join-Path $GuardHome 'app\lib\Guard.Setup.psm1').Replace("'", "''")
+    $q = "Import-Module '$module'; " +
+         "(Get-GuardSetupCheck -Nt8Version ([version]'8.1.8.3') -AutoLogon { `$true } -ScalePercent { 100 } -OtherWatchdogs { @() } | " +
+         "Where-Object Key -eq python | ForEach-Object { `$_.State + ' ' + `$_.Text })"
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($q))
+    $out = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc 2>$null | ForEach-Object { "$_" } |
+             Where-Object { $_ -and $_ -notmatch '^#< CLIXML|^<Objs' })
+    return (($out -join ' ').Trim())
+}
+
+function Write-GuardSums {
+    # SHA256SUMS.txt for every zip in -Dir (a test build beside the real one keeps both lines).
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Dir)
+    $lines = @(Get-ChildItem -LiteralPath $Dir -Filter '*.zip' -File | Sort-Object Name |
+               ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" })
+    $path = Join-Path $Dir 'SHA256SUMS.txt'
+    [IO.File]::WriteAllText($path, (($lines -join "`n") + "`n"))
+    return $path
+}
+
+function Get-GuardGuideStamp {
+    # One hash over the guide's sources - both HTML pages and every screenshot - so a rendered PDF and
+    # Quick Start can say what they were rendered from (rendered-from.txt) and a test can tell when the
+    # committed copies are stale.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$SourceDir, [string]$ShotsDir)
+    if (-not $ShotsDir) { $ShotsDir = Join-Path $SourceDir 'shots' }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $hex = { param([byte[]]$b) (($sha.ComputeHash($b) | ForEach-Object { $_.ToString('x2') }) -join '') }
+    $parts = @(foreach ($f in @(Get-ChildItem -LiteralPath $SourceDir -Filter '*.html' -File) + @(Get-ChildItem -LiteralPath $ShotsDir -Filter '*.png' -File) | Sort-Object Name) {
+        # HTML by its text with LF line endings (a clone with core.autocrlf checks it out with CRLF); PNG by its bytes.
+        $bytes = $(if ($f.Extension -eq '.html') { [Text.Encoding]::UTF8.GetBytes([IO.File]::ReadAllText($f.FullName).Replace("`r`n", "`n")) } else { [IO.File]::ReadAllBytes($f.FullName) })
+        "$($f.Name):$(& $hex $bytes)"
+    })
+    try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($parts -join "`n")) } finally { $sha.Dispose() }
+    return (($h | ForEach-Object { $_.ToString('x2') }) -join '')
+}
+
 function Invoke-GuardFreshInstall {
     # The release's last gate: install the finished zip the way a person does - extracted into an empty
     # folder, Install.cmd run with no Python on PATH - into a throwaway Guard home and Start menu, then
@@ -244,12 +305,9 @@ function Invoke-GuardFreshInstall {
     $x = Join-Path $work 'extracted'; $guardHome = Join-Path $work 'home'; $menu = Join-Path $work 'menu'; $shots = Join-Path $work 'shots'
     $problems = New-Object System.Collections.Generic.List[string]
     $log = New-Object System.Collections.Generic.List[string]
-    $savedPath = $env:PATH; $savedHome = $env:NT8GUARD_HOME
     try {
         [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $x)
-        # A clean machine: Windows and PowerShell on PATH, no Python, no repository.
-        $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
-        $env:NT8GUARD_HOME = $guardHome
+        Invoke-GuardCleanEnv -Work $work -GuardHome $guardHome -Script {
         $cmd = "`"`"$x\Install.cmd`" -GuardHome `"$guardHome`" -StartMenuDir `"$menu`" -NoLaunch < nul`""
         $out = @(& cmd.exe /s /c $cmd 2>&1 | ForEach-Object { "$_" }); $code = $LASTEXITCODE
         $log.AddRange([string[]]$out)
@@ -259,9 +317,7 @@ function Invoke-GuardFreshInstall {
         }
         if (-not (Test-Path (Join-Path $menu 'NT8 Guard.lnk'))) { $problems.Add('no Start-menu shortcut') }
         if (-not $problems.Count) {
-            $q = "Import-Module '$guardHome\app\lib\Guard.Setup.psm1'; " +
-                 "(Get-GuardSetupCheck -Nt8Version ([version]'8.1.8.3') -AutoLogon { `$true } -ScalePercent { 100 } -OtherWatchdogs { @() } | Where-Object Key -eq python | ForEach-Object { `$_.State + ' ' + `$_.Text })"
-            $py = (@(& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $q 2>&1) -join ' ').Trim()
+            $py = Get-GuardInstalledPythonRow -GuardHome $guardHome
             $log.Add("wizard python row: $py")
             if ($py -notmatch '^ok ' -or $py -notmatch [regex]::Escape("$guardHome\python\python.exe")) { $problems.Add("the installed wizard does not find the bundled Python: $py") }
             Push-Location $work
@@ -274,13 +330,13 @@ function Invoke-GuardFreshInstall {
             if ($c -ne 0 -or $n -lt 6) { $problems.Add("the installed panel did not render: exit $c, $n screenshots; $(@($o) -join ' ')") }
             foreach ($l in Test-GuardInstalledTree -Root $guardHome -Forbidden $Forbidden) { $problems.Add("installed file $l") }
         }
+        }
     } catch { $problems.Add("fresh install failed: $($_.Exception.Message)") }
     finally {
-        $env:PATH = $savedPath; $env:NT8GUARD_HOME = $savedHome
         for ($i = 0; $i -lt 10 -and (Test-Path $work); $i++) { try { [IO.Directory]::Delete($work, $true) } catch { Start-Sleep -Milliseconds 500 } }
     }
     return [pscustomobject]@{ Ok = (-not $problems.Count); Problems = $problems.ToArray(); Log = $log.ToArray() }
 }
 
-Export-ModuleMember -Function Get-GuardPythonRuntime, Expand-GuardPython, Copy-GuardTree, Get-GuardShipFiles, Get-GuardBuildSource, New-GuardStage, New-GuardScanTree,
+Export-ModuleMember -Function Invoke-GuardCleanEnv, Get-GuardInstalledPythonRow, Write-GuardSums, Get-GuardGuideStamp, Get-GuardPythonRuntime, Expand-GuardPython, Copy-GuardTree, Get-GuardShipFiles, Get-GuardBuildSource, New-GuardStage, New-GuardScanTree,
                               Write-GuardReleaseZip, Test-GuardReleaseZip, Test-GuardInstalledTree, Invoke-GuardFreshInstall

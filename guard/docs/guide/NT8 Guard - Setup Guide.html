@@ -313,7 +313,7 @@ figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-si
         <li><div><p>Be <strong>flat</strong>: the disconnect switches off the strategies on that connection, so Guard checks with the NT8 link first and refuses if you are not.</p></div></li>
         <li><div><p>Run it while the market is <strong>open</strong>: <strong>Tools → Run the fire drill</strong> (or from the wizard's last step). The window lists each step as it happens.</p></div></li>
       </ol>
-      <div class="note"><span class="label">On a weekend</span><p>Connect NinjaTrader to its <strong>Simulated Data Feed</strong> (Connections → Simulated Data Feed) with your watch-list instruments served by it. That feed never closes, so the feed guard turns the market calendar off and the drill runs. Give it a minute after connecting: the feed guard looks at which connection serves the watch list once a minute.</p></div>
+      <div class="note"><span class="label">On a weekend</span><p>Connect NinjaTrader to its <strong>Simulated Data Feed</strong> (Connections → Simulated Data Feed) with your watch-list instruments served by it. That feed never closes, so the feed guard turns the market calendar off and the drill runs. Give it a few seconds after connecting: the feed guard looks at which connection serves the watch list every 10 seconds.</p></div>
       <p>Strategies you switched off to be flat stay off afterwards; switch them back on yourself.</p>
     </section>
 
@@ -418,6 +418,7 @@ figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-si
           <tbody>
             <tr><td>Install.cmd: "cannot find the app folder"</td><td>Extract the whole zip first (right-click → Extract All), then run Install.cmd from the extracted folder.</td></tr>
             <tr><td>Install.cmd: "Close the NT8 Guard window first"</td><td>Close the control panel and run it again.</td></tr>
+            <tr><td>Install.cmd: "running scripts is disabled" or "is not digitally signed"</td><td>Your organisation sets this PC's PowerShell execution policy (Group Policy). Install.cmd already removes the download mark from its own files, which is enough for the usual policy; one that allows only signed scripts needs whoever manages the PC - or a PC you manage yourself.</td></tr>
             <tr><td>Step 1: Guard's Python is red</td><td>Run Install.cmd again from the extracted zip.</td></tr>
             <tr><td>Step 1: Other watchdogs is red</td><td>Disable the task it names in Task Scheduler (right-click → Disable), or close the program it names, then press Check again.</td></tr>
             <tr><td>Step 3: a light stays grey</td><td>The import must compile: open New → NinjaScript Editor, press F5, and read NinjaTrader's Log tab for an error.</td></tr>

@@ -383,7 +383,7 @@ function Invoke-GuardFireDrill {
     if (-not $hb.version -or [version][string]$hb.version -lt [version]$want -or $hb.events -ne $true) {
         return (& $refuse "The feed guard add-on in NinjaTrader is older than $want, and the drill follows the events only $want and later write. Import NT8Guard-AddOns.zip first.")
     }
-    if ($hb.scheduledClosed -eq $true) { return (& $refuse 'The market is closed now, and the feed guard ignores a quiet feed while it is closed. Run the drill while the market is open - or connect NinjaTrader to its Simulated Data Feed, which never closes (feed guard 5.0.0 and later).') }
+    if ($hb.scheduledClosed -eq $true) { return (& $refuse 'The market is closed now, and the feed guard ignores a quiet feed while it is closed. Run the drill while the market is open - or connect NinjaTrader to its Simulated Data Feed, which never closes (feed guard 5.0.0 and later). Just switched to it? Wait a few seconds: the feed guard checks every 10 seconds.') }
     if ([int]$hb.rung -gt 0) { return (& $refuse 'The feed guard is already recovering the feed. Try again once the Status tab shows the market data Live.') }
     # The overwatch stays out for the whole drill: it would read the silence as a dead feed, and the drill's
     # disconnect writes the marker its strategy restore answers to.

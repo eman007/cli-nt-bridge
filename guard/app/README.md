@@ -206,12 +206,16 @@ Documents works), or from `nt8.dataDir` in `guard.json`.
 ## Installing and updating
 
 Extract `NT8Guard-v<version>.zip` (right-click, *Extract All*), then double-click `Install.cmd` in the
-extracted folder. It unblocks the files (a download from the internet marks each one), copies `app\` and
-`python\` into Guard's folder, adds the Start-menu shortcut **NT8 Guard**, and opens the setup wizard.
+extracted folder. It unblocks the release's own files (a download from the internet marks each one) - first
+with a plain PowerShell command, so a script policy set by Group Policy does not refuse the installer
+before it starts - and never anything else in that folder; then it copies `app\` and `python\` into
+Guard's folder, adds the Start-menu shortcut **NT8 Guard** (naming the Guard folder when it is not the
+default one), and opens the setup wizard.
 
 **Updating** is the same: extract the new zip and run its `Install.cmd`. Your settings, saved password,
 logs, events and strategy backups are kept; the program is swapped in whole (copied beside the old one,
-then two renames), so a task never starts a half-copied program. It refuses while the control panel is
+then two renames; if the second rename fails, the previous version goes straight back), so a task never
+starts a half-copied or missing program. It refuses while the control panel is
 open or while NinjaTrader is being started - close the window, or wait a minute, and run it again. If the
 add-ons in the new release are newer, Status says so: import the new `NT8Guard-AddOns.zip` in NinjaTrader.
 

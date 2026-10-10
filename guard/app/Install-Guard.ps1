@@ -17,7 +17,10 @@
 # Never touched: guard.json, secrets\ (the saved password), state\, events\, logs\, the strategy backups,
 # NinjaTrader, and Guard's scheduled tasks (an update keeps the same paths, so the tasks need nothing).
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Source, [string]$GuardHome, [string]$StartMenuDir, [switch]$NoLaunch)
+# -PrintLaunch prints what would open instead of opening it; -RenameTries bounds the wait for a folder in use
+# (both for tests).
+param([Parameter(Mandatory)][string]$Source, [string]$GuardHome, [string]$StartMenuDir, [switch]$NoLaunch, [switch]$PrintLaunch,
+      [int]$RenameTries = 30)
 $ErrorActionPreference = 'Stop'
 
 function Say([string]$Text) { Write-Output "  $Text" }
@@ -75,7 +78,7 @@ function Install-GuardFolder([string]$Name) {
     if (Test-Path $live) {
         # A file open in the live folder (a backup tool still running) blocks the rename: wait it out.
         $moved = $false
-        for ($i = 0; $i -lt 30 -and -not $moved; $i++) {
+        for ($i = 0; $i -lt $RenameTries -and -not $moved; $i++) {
             try { [IO.Directory]::Move($live, $old); $moved = $true } catch { Start-Sleep -Seconds 1 }
         }
         if (-not $moved) {
@@ -123,9 +126,12 @@ try {
 if (-not $StartMenuDir) { $StartMenuDir = [Environment]::GetFolderPath('Programs') }
 if (-not (Test-Path $StartMenuDir)) { New-Item -ItemType Directory -Path $StartMenuDir -Force | Out-Null }
 $app = Join-Path $guardDir 'app'
+# A Guard folder other than the default is named to the panel; the default one it finds by itself.
+$defaultHome = [IO.Path]::Combine([Environment]::GetFolderPath('LocalApplicationData'), 'NT8Guard')
+$homeArgs = $(if ($guardDir -ne $defaultHome.TrimEnd('\')) { @('"-GuardHome"', "`"$guardDir`"") } else { @() })
 $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $StartMenuDir 'NT8 Guard.lnk'))
 $lnk.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
-$lnk.Arguments = "`"$(Join-Path $app 'Guard-Run.vbs')`" `"Guard-Panel.ps1`""
+$lnk.Arguments = ((@("`"$(Join-Path $app 'Guard-Run.vbs')`"", '"Guard-Panel.ps1"') + $homeArgs) -join ' ')
 $lnk.WorkingDirectory = $app
 $lnk.Description = 'NT8 Guard control panel'
 $lnk.Save()
@@ -134,13 +140,16 @@ Write-Output ''
 Write-Output "  Installed in $guardDir"
 
 # 6. Open the wizard (first install) or the panel (update).
-if (-not $NoLaunch) {
+if (-not $NoLaunch -or $PrintLaunch) {
     Import-Module (Join-Path $app 'lib\Guard.Setup.psm1') -DisableNameChecking
     $done = $false
     try { $done = (Get-GuardSetupState -GuardHome $guardDir).Completed } catch { }
-    $launch = @("`"$(Join-Path $app 'Guard-Run.vbs')`"", '"Guard-Panel.ps1"')
+    $launch = @("`"$(Join-Path $app 'Guard-Run.vbs')`"", '"Guard-Panel.ps1"') + $homeArgs
     if (-not $done) { $launch += '"-Wizard"' }
-    Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\wscript.exe') -ArgumentList $launch
-    Write-Output $(if ($done) { '  Opening NT8 Guard.' } else { '  Opening the setup wizard.' })
+    if ($PrintLaunch) { Write-Output "  launch: wscript.exe $($launch -join ' ')" }
+    else {
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\wscript.exe') -ArgumentList $launch
+        Write-Output $(if ($done) { '  Opening NT8 Guard.' } else { '  Opening the setup wizard.' })
+    }
 }
 exit 0

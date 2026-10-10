@@ -26,6 +26,10 @@ if ($scheduled -notmatch 'DayOfWeek.Saturday') { throw 'IsScheduledClosed slice 
 # The stall path must refresh the Simulated-Data-Feed answer BEFORE the calendar gate reads it (final review I4).
 $tick = $src.Substring($src.IndexOf('bool scheduledClosed = _useSessionGate') - 600, 700)
 $onsetRefresh = ($tick -match 'RefreshSimFeedOnly\(\)') -and $tick.IndexOf('RefreshSimFeedOnly()') -lt $tick.IndexOf('bool scheduledClosed')
+# ...and on every tick (10 s), not inside the once-a-minute providers block (deferred minor: the weekend drill's wait).
+$minute = $src.Substring($src.IndexOf('(now - _providersAt).TotalSeconds >= 60.0'), 400)
+$minute = $minute.Substring(0, $minute.IndexOf('}') + 1)
+$everyTick = ($minute -notmatch 'RefreshSimFeedOnly') -and ($src -match 'if \(_watchdogSubs\.Count > 0\) RefreshSimFeedOnly\(\);')
 
 $dir = Join-Path $env:TEMP 'stallgate'; New-Item -ItemType Directory -Force $dir | Out-Null
 $cs = @"
@@ -116,6 +120,8 @@ class H {
         N("nor does a recovery on a broker switch it off", false, false, 1, new[] { "Simulator" });
         N("between recoveries a switch to a broker turns the calendar on", false, true, 0, new[] { "Rithmic" });
         N("between recoveries the Simulated Data Feed turns it off", true, false, 0, new[] { "Simulator" });
+        if ($(if ($everyTick) { 'true' } else { 'false' })) Console.WriteLine("  PASS  the provider is re-read every tick, not once a minute");
+        else { fail++; Console.WriteLine("  FAIL  the provider is re-read every tick, not once a minute"); }
         if ($(if ($onsetRefresh) { 'true' } else { 'false' })) Console.WriteLine("  PASS  a stall re-reads the feed's provider before the calendar decides");
         else { fail++; Console.WriteLine("  FAIL  a stall re-reads the feed's provider before the calendar decides"); }
 

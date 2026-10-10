@@ -40,6 +40,7 @@ Check 'a Start-menu shortcut' (Test-Path $lnkPath) (@(Get-ChildItem $menu).Name 
 $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut($lnkPath)
 Check 'it opens the panel without a console window' ($lnk.TargetPath -match 'wscript\.exe$' -and $lnk.Arguments -match [regex]::Escape((Join-Path $guardHome 'app\Guard-Run.vbs')) -and $lnk.Arguments -match 'Guard-Panel\.ps1') "$($lnk.TargetPath) $($lnk.Arguments)"
 Check 'from Guard''s app folder' ($lnk.WorkingDirectory -eq (Join-Path $guardHome 'app')) $lnk.WorkingDirectory
+Check 'a Guard folder other than the default is passed to the panel (deferred minor)' ($lnk.Arguments -match '-GuardHome' -and $lnk.Arguments -match [regex]::Escape($guardHome)) $lnk.Arguments
 Check 'and says what it did' ($r.Out -match '0\.9\.0' -and $r.Out -match [regex]::Escape($guardHome)) $r.Out
 $ver = & powershell.exe -NoProfile -Command "Import-Module '$(Join-Path $guardHome 'app\lib\Guard.Paths.psm1')'; Get-GuardVersion"
 Check 'the installed program knows its version' ("$ver".Trim() -eq '0.9.0') "$ver"
@@ -107,6 +108,37 @@ Set-Content -LiteralPath (Join-Path $src 'python\backup_export.py') -Stream Zone
 $r = Install
 Check 'its own files are unblocked' ($r.Code -eq 0 -and -not (Marked (Join-Path $src 'python\backup_export.py'))) $r.Out
 Check 'files that are not part of the release keep their mark' ((Marked $other) -and (Marked $other2)) ''
+
+'--- a folder held open, and what opens afterwards (deferred minors)'
+# A backup tool still running holds a file in python\: the program swaps, the runtime cannot - say so, keep it.
+[IO.File]::WriteAllText((Join-Path $src 'app\VERSION'), '0.9.3')
+$held = [IO.File]::Open((Join-Path $guardHome 'python\python.exe'), 'Open', 'Read', 'None')
+$r = Install @('-RenameTries', '2')
+$held.Dispose()
+Check 'python\ in use: refused, says what was already updated, keeps the runtime' (
+    $r.Code -ne 0 -and $r.Out -match 'in use' -and $r.Out -match 'Already updated: app' -and
+    (Read-AllText (Join-Path $guardHome 'python\python.exe')) -eq 'runtime' -and -not (Test-Path (Join-Path $guardHome 'python.new'))) $r.Out
+$r = Install
+Check 'and the next run finishes it' ($r.Code -eq 0) $r.Out
+function InstallPrint {
+    $ErrorActionPreference = 'Continue'
+    $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $src 'app\Install-Guard.ps1') -Source $src -GuardHome $guardHome -StartMenuDir $menu -PrintLaunch 2>&1
+    return (@($o | ForEach-Object { "$_" }) -join "`n")
+}
+[IO.File]::WriteAllText((Join-Path $guardHome 'guard.json'), '{"setup":{"step":3,"completed":false}}')
+$o = InstallPrint
+Check 'setup not finished: the wizard opens, for this Guard folder' ($o -match 'launch: .*Guard-Panel\.ps1.*-Wizard' -and $o -match [regex]::Escape($guardHome)) $o
+[IO.File]::WriteAllText((Join-Path $guardHome 'guard.json'), '{"setup":{"step":7,"completed":true}}')
+$o = InstallPrint
+Check 'setup finished: the panel opens' ($o -match 'launch: .*Guard-Panel\.ps1' -and $o -notmatch '-Wizard') $o
+
+'--- Install.cmd unblocks the release before PowerShell loads it (deferred minor: a policy set by Group Policy)'
+foreach ($f in 'app\Install-Guard.ps1', 'app\lib\Guard.Paths.psm1') { Set-Content -LiteralPath (Join-Path $src $f) -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3" }
+Set-Content -LiteralPath $other -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
+# -NotAParameter stops Install-Guard.ps1 before its own code runs: only Install.cmd's first step can unblock.
+& { $ErrorActionPreference = 'Continue'; $null = (& cmd.exe /s /c "`"`"$(Join-Path $src 'Install.cmd')`" -NotAParameter < nul`"" 2>&1) }
+Check 'the release''s scripts are unblocked by Install.cmd itself' (-not (Marked (Join-Path $src 'app\Install-Guard.ps1')) -and -not (Marked (Join-Path $src 'app\lib\Guard.Paths.psm1'))) ''
+Check 'and nothing else in its folder' (Marked $other) ''
 
 '--- Install.cmd run from inside the zip (not extracted)'
 $lone = New-TestDir lone

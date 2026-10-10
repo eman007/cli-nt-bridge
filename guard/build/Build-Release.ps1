@@ -12,7 +12,8 @@
 #   4. a scan of everything that ships (but the pinned runtime) finds no personal string;
 #   5. every zip entry uses '/', and the pieces a person needs are all in it;
 #   6. the finished zip installs into a clean temporary profile and works from there.
-# Output: guard\build\release\NT8Guard-v<version>.zip and SHA256SUMS.txt beside it.
+# Output: guard\build\release\NT8Guard-v<version>.zip, <name>.BUILD.txt (its commit), and SHA256SUMS.txt
+# (one line for every zip in the folder).
 [CmdletBinding()]
 param([string]$DenyList, [string[]]$ConfigFile, [string]$OutDir, [string]$Python, [switch]$SkipSuites, [switch]$AllowDirty)
 $ErrorActionPreference = 'Stop'
@@ -110,8 +111,8 @@ $fresh.Log | Where-Object { $_ -match 'wizard|backup_export|panel' } | ForEach-O
 if (-not $fresh.Ok) { [IO.File]::Delete($zip); Refuse "the fresh install: $($fresh.Problems -join '; ')" }
 
 $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-[IO.File]::WriteAllText((Join-Path $OutDir 'SHA256SUMS.txt'), "$sha  $name.zip`n")
-[IO.File]::WriteAllText((Join-Path $OutDir 'BUILD.txt'), ("$name.zip`ncommit $($src.Commit)`nbuilt $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')) UTC`npython $PythonVersion (sha256 $PythonSha256)`n" +
+Write-GuardSums -Dir $OutDir | Out-Null
+[IO.File]::WriteAllText((Join-Path $OutDir "$name.BUILD.txt"), ("$name.zip`ncommit $($src.Commit)`nbuilt $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')) UTC`npython $PythonVersion (sha256 $PythonSha256)`n" +
                                                          $(if (@($src.Dirty).Count) { "UNCOMMITTED CHANGES: $(@($src.Dirty) -join ', ')`n" } else { '' })))
 Step "DONE: $zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB), sha256 $sha"
 exit 0
