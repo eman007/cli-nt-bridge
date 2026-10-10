@@ -313,7 +313,12 @@ figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-si
         <li><div><p>Be <strong>flat</strong>: the disconnect switches off the strategies on that connection, so Guard checks with the NT8 link first and refuses if you are not.</p></div></li>
         <li><div><p>Run it while the market is <strong>open</strong>: <strong>Tools → Run the fire drill</strong> (or from the wizard's last step). The window lists each step as it happens.</p></div></li>
       </ol>
-      <div class="note"><span class="label">On a weekend</span><p>Connect NinjaTrader to its <strong>Simulated Data Feed</strong> (Connections → Simulated Data Feed) with your watch-list instruments served by it. That feed never closes, so the feed guard turns the market calendar off and the drill runs. Give it a few seconds after connecting: the feed guard looks at which connection serves the watch list every 10 seconds.</p></div>
+      <div class="note"><span class="label">On a weekend</span><p>Use NinjaTrader's <strong>Simulated Data Feed</strong>: it makes up prices around the clock, so the feed guard turns the market calendar off for it and the drill runs. It is not the connection called <strong>Simulation</strong> that newer NinjaTrader versions connect by default - that one streams real market data and keeps market hours.</p>
+        <ol class="list">
+          <li>In NinjaTrader: <strong>Connections → Configure</strong>, add <strong>Simulated Data Feed</strong> from the list, OK.</li>
+          <li>Disconnect <strong>Simulation</strong> and connect <strong>Simulated Data Feed</strong>, so it serves your watch list.</li>
+          <li>Wait a few seconds (the feed guard looks every 10 seconds), then run the drill. Afterwards, switch back to your usual connection.</li>
+        </ol></div>
       <p>Strategies you switched off to be flat stay off afterwards; switch them back on yourself.</p>
     </section>
 
@@ -426,7 +431,7 @@ figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-si
             <tr><td>NinjaTrader stays at its login window</td><td>Tick Remember username in it once; save the password again (Tools → NinjaTrader login); then Test login.</td></tr>
             <tr><td>"The saved password was refused twice"</td><td>Guard stopped trying so your broker does not lock the account. Save the right password, or log in by hand once.</td></tr>
             <tr><td>No alerts on the phone</td><td>Alerts → Send a test. The ntfy app must be subscribed to exactly the same topic, with notifications allowed.</td></tr>
-            <tr><td>Fire drill: "the market is closed"</td><td>Run it while the market is open, or on NinjaTrader's Simulated Data Feed.</td></tr>
+            <tr><td>Fire drill: "the market is closed"</td><td>Run it while the market is open, or on NinjaTrader's Simulated Data Feed - not the <strong>Simulation</strong> connection, which keeps market hours (see <a href="#drill">the fire drill</a>).</td></tr>
             <tr><td>Fire drill / Put back: "can't confirm you're flat"</td><td>The NT8 link did not answer or answered something it could not mean. Wait a minute after NinjaTrader starts; check the NT8 link card on Status.</td></tr>
             <tr><td>NinjaTrader restarted and you do not know why</td><td>Status → Recent events says why; Tools → Logs has the detail.</td></tr>
           </tbody>

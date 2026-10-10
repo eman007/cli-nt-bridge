@@ -178,6 +178,10 @@ $stampFile = Join-Path $guideDir 'rendered-from.txt'
 $now = Get-GuardGuideStamp -SourceDir $guideDir
 Check 'rendered from exactly the committed HTML and screenshots' ((Test-Path $stampFile) -and (Read-AllText $stampFile).Trim() -eq $now) "stamp $(Read-AllText $stampFile) vs sources $now"
 Check 'the guide says what to do when a PC''s policy blocks scripts' ($guide -match 'execution policy') ''
+# Cold test 2026-10-10: a newer NinjaTrader connects "Simulation" (real market data, market hours) and does not
+# connect the Simulated Data Feed until you add it.
+$arrow = [string][char]0x2192    # the guide's arrow; this file stays ASCII (PowerShell 5.1 reads it as ANSI)
+Check 'the weekend drill says how to add the Simulated Data Feed and leave "Simulation"' ($guide.Contains("Connections $arrow Configure") -and $guide -match 'Disconnect <strong>Simulation</strong>') ''
 # A clone with core.autocrlf checks the HTML out with CRLF: the same sources, so the same stamp.
 $crlf = Join-Path (New-TestDir crlf) 'guide'; Copy-Item $guideDir $crlf -Recurse
 foreach ($h in Get-ChildItem $crlf -Filter *.html) { $t = [IO.File]::ReadAllText($h.FullName).Replace("`r`n", "`n").Replace("`n", "`r`n"); [IO.File]::WriteAllText($h.FullName, $t, (New-Object Text.UTF8Encoding($false))) }

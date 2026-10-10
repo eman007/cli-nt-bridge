@@ -69,6 +69,11 @@ $r = Drill
 Check 'the market is closed' ($r.Result -eq 'refused' -and $r.Message -match 'market is closed' -and -not (Test-Path $deafPath)) $r.Message
 Check 'and it names the weekend way: the Simulated Data Feed never closes' ($r.Message -match 'Simulated Data Feed') $r.Message
 Check 'and says to wait a few seconds after switching to it (deferred minor)' ($r.Message -match 'few seconds') $r.Message
+# Cold test 2026-10-10: a newer NinjaTrader's "Simulation" connection streams real market data and keeps market
+# hours; the refusal must say which connection serves the watch list, so the person knows to switch.
+Reset @(); Set-Heartbeat @{ scheduledClosed = $true; feedProviders = 'Simulation'; simulatedFeed = $false }
+$r = Drill
+Check 'it names the connection serving the watch list, and that it keeps market hours' ($r.Result -eq 'refused' -and $r.Message -match 'served by Simulation' -and $r.Message -match 'market hours') $r.Message
 Reset @(); Set-Heartbeat @{ rung = 2 }
 $r = Drill
 Check 'a recovery is already running' ($r.Result -eq 'refused' -and $r.Message -match 'already recovering') $r.Message
