@@ -163,6 +163,10 @@ Check 'budget spent -> backoff' ((& $gate -Launch) -eq 'backoff')
 $until = ConvertFrom-GuardUtc ([IO.File]::ReadAllText((Join-Path (Get-GuardPath state) 'start.backoff-until')).Trim())
 Check 'first backoff 60 min' ([math]::Round(($until - $t).TotalMinutes) -eq 60) ($until - $t).TotalMinutes
 Check 'alerted' ([bool](Read-GuardEvents -KindPattern '^alert\.sent$' | Where-Object { $_.text -like '*backoff*' }))
+# Cold test 2026-10-10: the attempts that tripped it had crashed before NinjaTrader started - "NinjaTrader was
+# started or stopped 4 times" overstated it. Guard counts its own attempts.
+$logs = (Get-ChildItem (Get-GuardPath logs) -Filter *.log | ForEach-Object { Read-AllText $_.FullName }) -join "`n"
+Check 'the alert says Guard TRIED to start or stop it' ($logs -match 'Guard tried to start or stop NinjaTrader 4 times') ''
 Check 'still inside -> backing-off' ((& $gate) -eq 'backing-off')
 Remove-Item (Join-Path (Get-GuardPath state) 'start.backoff-until') -Force
 Check 'a second trip within 24 h -> 120 min' ((& $gate -Launch) -eq 'backoff')

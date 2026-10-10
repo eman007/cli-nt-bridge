@@ -235,7 +235,7 @@ function Test-Nt8StartAllowed {
         & $log "BACKOFF: $recent starts/stops in $($rl.windowMinutes) min -> not starting NinjaTrader again for $mins min"
         Write-GuardEvent -Component $Component -Kind 'nt8.backoff' -Severity alert -Text "Stopped restarting NinjaTrader for $mins min" -GuardHome $GuardHome
         Send-GuardAlert -Title 'NT8 restarts PAUSED (backoff)' `
-                        -Body "NinjaTrader was started or stopped $recent times in $($rl.windowMinutes) minutes and is still not staying up. Guard stopped trying for $mins minutes (each further backoff today doubles it) so it does not hammer a failing login - a retry storm can get a broker account flagged. Check the NinjaTrader login by hand." `
+                        -Body "Guard tried to start or stop NinjaTrader $recent times in $($rl.windowMinutes) minutes and it is still not staying up. Guard stopped trying for $mins minutes (each further backoff today doubles it) so it does not hammer a failing login - a retry storm can get a broker account flagged. Check the NinjaTrader login by hand." `
                         -Severity alert -Config $Config -Component $Component -GuardHome $GuardHome | Out-Null
         return 'backoff'
     }

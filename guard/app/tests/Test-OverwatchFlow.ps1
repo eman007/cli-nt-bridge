@@ -29,6 +29,16 @@ Check 'fault counter cleared' ($script:state.consecutive -eq 0)
 Invoke-OverwatchDown
 Check 'said once, not every minute' (@($script:logLines | Where-Object { $_ -match 'relauncher is running' }).Count -eq 1)
 
+'=== NinjaTrader down while starts are backing off: says so, not "the relauncher starts it" (cold test 2026-10-10)'
+Reset; [IO.File]::WriteAllText($hb, [DateTime]::UtcNow.ToString('o'))
+$bo = Join-Path $stateDir 'start.backoff-until'
+[IO.File]::WriteAllText($bo, [DateTime]::UtcNow.AddMinutes(40).ToString('o'))
+Invoke-OverwatchDown; Invoke-OverwatchDown
+$l = @($script:logLines | Where-Object { $_ -match 'backing off' })
+Check 'the log says starts are held back, until when, once' ($l.Count -eq 1 -and $l[0] -match 'until \d\d:\d\d' -and -not @($script:logLines | Where-Object { $_ -match 'relauncher is running and starts it' }).Count) ($script:logLines -join ' | ')
+Check 'and the overwatch does not start it either' ($script:starts.Count -eq 0) ''
+Remove-Item $bo -Force
+
 '=== NinjaTrader down, relauncher NOT running (stale heartbeat): the overwatch starts it, through the shared routine'
 Reset; [IO.File]::WriteAllText($hb, [DateTime]::UtcNow.AddMinutes(-10).ToString('o'))
 (Get-Item $hb).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-10)
@@ -143,7 +153,7 @@ try {
 } finally { $held.Close() }
 Check 'exits 0' ($code -eq 0) $out
 Check 'did nothing: no heartbeat, no state' (-not (Test-Path (Join-Path $lockHome 'state\overwatch.heartbeat')) -and -not (Test-Path (Join-Path $lockHome 'state\overwatch.state.json')))
-Check 'and said why' ((Read-AllText (Join-Path $lockHome 'logs\overwatch.log')) -match 'previous run is still working')
+Check 'and said why: its previous run, or a panel action (the fire drill holds it for minutes)' ((Read-AllText (Join-Path $lockHome 'logs\overwatch.log')) -match 'previous run or a panel action')
 
 '=== -Report reads only: answers, never writes, never acts'
 $reportHome = New-TestDir owreport

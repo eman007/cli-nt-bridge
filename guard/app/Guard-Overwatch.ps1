@@ -883,7 +883,16 @@ function Invoke-DuplicateWatch {
 function Invoke-OverwatchDown {
     $state.consecutive = 0; $state.fault = ''
     if (Test-RelauncherFresh -GuardHome $GuardHome -MaxAgeSeconds ([int]$cfg.relauncherStaleSeconds)) {
-        if ($state.startNote -ne 'relauncher') { Log 'NinjaTrader is down - the relauncher is running and starts it'; $state.startNote = 'relauncher' }
+        # Starts held back by the backoff: say so - "the relauncher starts it" read as a broken promise (2026-10-10).
+        $bo = Join-Path $stateDir 'start.backoff-until'
+        $until = $null
+        if (Test-Path $bo) { try { $until = ConvertFrom-GuardUtc ([IO.File]::ReadAllText($bo).Trim()) } catch { } }
+        if ($until -and [DateTime]::UtcNow -lt $until) {
+            if ($state.startNote -ne 'backoff') {
+                Log ("NinjaTrader is down - starts are backing off (too many tries) until " + $until.ToLocalTime().ToString('HH:mm') + '; the relauncher starts it after that')
+                $state.startNote = 'backoff'
+            }
+        } elseif ($state.startNote -ne 'relauncher') { Log 'NinjaTrader is down - the relauncher is running and starts it'; $state.startNote = 'relauncher' }
         return
     }
     $hbAge = Get-AgeSeconds (Join-Path $stateDir 'relaunch.heartbeat')
@@ -923,7 +932,8 @@ if ($TestAlert) {
 if (-not $Report) {
     $runLock = $null
     try { $runLock = [IO.File]::Open((Join-Path $stateDir 'overwatch.lock'), 'OpenOrCreate', 'ReadWrite', 'None') } catch { }
-    if (-not $runLock) { Log 'skipped: the previous run is still working'; exit 0 }
+    # Held by the previous run, or by a control-panel action (the fire drill holds it for minutes).
+    if (-not $runLock) { Log 'skipped: the overwatch is busy elsewhere - its previous run or a panel action (fire drill, Put back, Test login) is still working'; exit 0 }
 }
 
 # Proof-of-life for the OVERWATCH ITSELF, every scheduled run - also while paused. A healthy overwatch
