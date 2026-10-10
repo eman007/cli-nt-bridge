@@ -147,4 +147,11 @@ Clear-Nt8Cache -Nt8Dir $h.Nt8 -Log { param($m) }
 Check 'caches emptied' (-not (Test-Path (Join-Path $h.Nt8 'cache\f.bin')) -and -not (Test-Path (Join-Path $h.Nt8 'db\cache\f.bin')) -and -not (Test-Path (Join-Path $h.Nt8 'tmp\f.bin')))
 Check 'historical data untouched' ((Test-Path (Join-Path $h.Nt8 'db\day\f.bin')) -and (Test-Path (Join-Path $h.Nt8 'db\minute\f.bin')) -and (Test-Path (Join-Path $h.Nt8 'db\tick\f.bin')))
 
+'=== the helper marks its login inside its try (cold test 2026-10-10)'
+# The starter writes the in-flight marker, then the helper writes it again. That second write threw (see
+# Test-GuardStart) OUTSIDE the helper's try: it died with no log line, no NinjaTrader, and its marker left
+# behind. Anything that can fail must be inside the try, whose finally removes the marker.
+$body = [IO.File]::ReadAllText((Join-Path $script:AppDir 'Guard-Login.ps1'))
+Check 'Set-LoginInflight runs inside the try' ($body -match '(?s)\$code = 1\s*\r?\ntry \{\s*\r?\n\s*Set-LoginInflight -ProcessId \$PID') ''
+
 Complete-Test

@@ -105,6 +105,13 @@ Clear-StartState
 Set-LoginInflight -ProcessId $PID
 Check 'marker = in flight for everyone else' (Test-LoginInFlight -Config (Get-GuardDefaults))
 Check 'but not for the login it names' (-not (Test-LoginInFlight -Config (Get-GuardDefaults) -ExceptPid $PID))
+# Cold test 2026-10-10: a login helper that died left its marker; the NEXT start wrote over it through
+# File.Replace(tmp, f, $null) - PowerShell passes $null to a string parameter as "" -> "The path is not of a
+# legal form", and every start after the first failed one crashed.
+$err = $null
+try { Set-LoginInflight -ProcessId 4242 } catch { $err = $_.Exception.Message }
+Check 'a second start writes over a marker left behind' (-not $err -and ([IO.File]::ReadAllText((Get-LoginInflightPath)) | ConvertFrom-Json).pid -eq 4242) $err
+Check 'and leaves no temp file' (-not @(Get-ChildItem (Split-Path (Get-LoginInflightPath)) -Filter 'login.inflight.*.tmp').Count) ''
 Remove-Item (Get-LoginInflightPath) -Force
 
 '=== an external login program counts as in flight only while it is young; a hung one is stopped'

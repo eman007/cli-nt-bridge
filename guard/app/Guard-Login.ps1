@@ -298,9 +298,9 @@ if (-not (Test-GuardPassword $GuardHome)) {
     exit 1
 }
 
-Set-LoginInflight -ProcessId $PID -GuardHome $GuardHome
 $code = 1
 try {
+    Set-LoginInflight -ProcessId $PID -GuardHome $GuardHome    # inside the try: a failure here is logged, and the finally removes the marker
     $nt8 = Get-Nt8DataDir $cfg.nt8.dataDir
     if ($cfg.login.clearCacheBeforeLaunch -and -not (& $script:RealOps.IsRunning)) { Clear-Nt8Cache -Nt8Dir $nt8 -Log $log }
     Initialize-LoginNative

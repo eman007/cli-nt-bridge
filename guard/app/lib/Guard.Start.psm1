@@ -73,8 +73,16 @@ function Set-LoginInflight {
     [CmdletBinding()] param([Parameter(Mandatory)][int]$ProcessId, [string]$GuardHome)
     $f = Get-LoginInflightPath $GuardHome
     $tmp = "$f.$PID.tmp"
-    [IO.File]::WriteAllText($tmp, ([ordered]@{ pid = $ProcessId; startedUtc = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress))
-    try { [IO.File]::Move($tmp, $f) } catch { [IO.File]::Replace($tmp, $f, $null) }
+    try {
+        [IO.File]::WriteAllText($tmp, ([ordered]@{ pid = $ProcessId; startedUtc = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress))
+        # Over an existing marker (the starter wrote it, the helper writes it again; or a dead helper left one):
+        # File.Replace with NO backup. Not $null - PowerShell hands a .NET string parameter "" for $null, and
+        # "" is "not of a legal form" (cold test 2026-10-10: every start through the built-in login died here).
+        if (Test-Path -LiteralPath $f) { [IO.File]::Replace($tmp, $f, [NullString]::Value) }
+        else { try { [IO.File]::Move($tmp, $f) } catch { [IO.File]::Replace($tmp, $f, [NullString]::Value) } }
+    } finally {
+        if (Test-Path -LiteralPath $tmp) { try { [IO.File]::Delete($tmp) } catch { } }
+    }
 }
 
 function Test-LoginInFlight {
