@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-10
+
 ### Added
 
 - **NT8 Guard 0.9.0 (beta)** - `guard/`: keeps NinjaTrader 8 running on its own. A relauncher and an
