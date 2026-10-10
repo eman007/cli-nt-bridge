@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- NT8 Guard: *Finish setup* no longer refuses because of a relauncher for another program (an
+  Interactive Brokers TWS one whose name holds `Relaunch-Watchdog`); only NinjaTrader watchdog names
+  count.
+- NT8 Guard: the overwatch's hourly log line says `market data: none since the feed guard loaded`
+  instead of `market data s` before the feed guard's first tick (a closed market, no connection).
+- NT8 Guard tests: the pause check no longer fails within 30 minutes of midnight UTC.
+
 ## [1.7.0] - 2026-10-10
 
 ### Added

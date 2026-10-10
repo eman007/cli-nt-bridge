@@ -47,6 +47,11 @@ $found = @(Get-GuardOtherWatchdogs -Tasks $tasks -Processes { , @() })
 Check 'finds the switched-on relaunchers and overwatches of another kind, or of another Guard' (($found -join ',') -eq 'Old-NT8Relaunch,Bridge-Watch,Copy-Guard-Relaunch') ($found -join ',')
 $found = @(Get-GuardOtherWatchdogs -Tasks { , @() } -Processes { , @([pscustomobject]@{ ProcessId = 9; CommandLine = 'python.exe -m nt8bridge watchdog --interval 30' }) })
 Check 'and a watchdog running by hand' ($found.Count -eq 1 -and $found[0] -match 'nt8bridge watchdog') ($found -join ',')
+# P6 desktop 2026-10-10: Finish refused over an Interactive Brokers TWS relauncher - its launcher's name holds
+# "Relaunch-Watchdog" - though it never touches NinjaTrader.
+$found = @(Get-GuardOtherWatchdogs -Tasks { , @([pscustomobject]@{ TaskName = 'TWS-Relaunch'; State = 'Ready'; Actions = @([pscustomobject]@{ Execute = 'wscript.exe'; Arguments = '"C:\x\IBC\TWS-Relaunch-Watchdog-Launcher.vbs"' }) }) } `
+                                   -Processes { , @([pscustomobject]@{ ProcessId = 11; CommandLine = 'powershell.exe -NoProfile -WindowStyle Hidden -File "C:\x\IBC\TWS-Relaunch-Watchdog.ps1"' }) })
+Check 'a relauncher for some other program (a TWS one) is not a NinjaTrader watchdog' ($found.Count -eq 0) ($found -join ',')
 $r = Get-GuardSetupCheck -Config $cfg -Nt8Dir $h.Nt8 -AutoLogon { $true } -ScalePercent { 100 } -Nt8Version ([version]'8.1.8.3') -OtherWatchdogs { @('Old-NT8Relaunch') }
 Check 'step 1 names it, in red, and says what to do' ((Row $r others).State -eq 'bad' -and (Row $r others).Text -match 'Old-NT8Relaunch' -and (Row $r others).Text -match 'Disable') (Row $r others).Text
 

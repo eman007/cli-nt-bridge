@@ -165,4 +165,13 @@ Check 'reports the NinjaTrader folder it watches' ($v.base -eq $h.Nt8) "base=$($
 $written = @(Get-ChildItem $reportHome -Recurse -File -ErrorAction SilentlyContinue)
 Check 'nothing written (no state, no log, no heartbeat)' ($written.Count -eq 0) (($written | ForEach-Object { $_.Name }) -join ', ')
 
+'=== the hourly alive line (P6 desktop 2026-10-10: feed guard 5.0 reports no age before its first tick - "market data s")'
+Invoke-Expression (Get-OverwatchFunction 'Format-AliveLine')
+$l = Format-AliveLine -UpSeconds 93240 -FeedGuardAge 0.7 -LinkAge 0.5 -FeedAge $null
+Check 'no market data yet: says so, not a bare "s"' ($l -match 'market data: none since the feed guard loaded' -and $l -notmatch 'market data s') $l
+$l = Format-AliveLine -UpSeconds 600 -FeedGuardAge 1.2 -LinkAge 0.4 -FeedAge 240
+Check 'with an age: the same words as before' ($l -eq 'overwatch: alive; NinjaTrader up 10min, feed guard 1.2s, NT8 link 0.4s, market data 240s') $l
+$l = Format-AliveLine -UpSeconds $null -FeedGuardAge 1 -LinkAge 1 -FeedAge 5
+Check 'NinjaTrader start unknown: ?' ($l -match 'NinjaTrader up \?min') $l
+
 Complete-Test

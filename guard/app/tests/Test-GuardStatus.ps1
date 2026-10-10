@@ -298,7 +298,9 @@ Check 'the cards still say what happened' ((Card $s login).Headline -eq 'Last lo
 New-Healthy | Out-Null
 Set-GuardPause -Minutes 30 -Reason 'test' | Out-Null
 $s = Get-S @{ NowUtc = [DateTime]::UtcNow }
-Check 'paused overrides the pill' ($s.Overall.State -eq 'paused' -and $s.Overall.Text -match '^PAUSED until \d\d:\d\d$') $s.Overall.Text
+# The pause runs on the real clock: within 30 minutes of midnight (UTC, this test's zone) it ends tomorrow,
+# which the pill rightly writes with the day ('Sun 00:06'). Failed 2026-10-10 at 23:36 UTC on the old pattern.
+Check 'paused overrides the pill' ($s.Overall.State -eq 'paused' -and $s.Overall.Text -match '^PAUSED until ([A-Z][a-z]{2} )?\d\d:\d\d$') $s.Overall.Text
 Check 'watchdogs card off while paused' ((Card $s watchdogs).State -eq 'off') (Card $s watchdogs).State
 Check 'pause object carries reason' ($s.Pause.Paused -and $s.Pause.Reason -eq 'test') ''
 Clear-GuardPause

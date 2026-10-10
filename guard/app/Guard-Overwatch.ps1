@@ -221,6 +221,14 @@ function Get-AgeSeconds([string]$path) {
     try { return [math]::Round(([DateTime]::UtcNow - (Get-Item $path).LastWriteTimeUtc).TotalSeconds, 1) } catch { return $null }
 }
 
+# The hourly proof-of-life line. The feed guard reports no market-data age until its first tick after it
+# loads (a closed market, no connection): say so rather than a bare "market data s".
+function Format-AliveLine($UpSeconds, $FeedGuardAge, $LinkAge, $FeedAge) {
+    $up = $(if ($null -ne $UpSeconds) { [math]::Round([double]$UpSeconds / 60) } else { '?' })
+    $md = $(if ($null -ne $FeedAge -and "$FeedAge" -ne '') { "market data ${FeedAge}s" } else { 'market data: none since the feed guard loaded' })
+    return ("overwatch: alive; NinjaTrader up {0}min, feed guard {1}s, NT8 link {2}s, {3}" -f $up, $FeedGuardAge, $LinkAge, $md)
+}
+
 # A heartbeat that has not been written since THIS NinjaTrader started belongs to an add-on that is not
 # running in it at all - not loaded, removed, or failed to compile after an update. That is not a wedge,
 # and restarting cannot fix it: restarting every cooldown, forever, would only knock the strategies off
@@ -1287,8 +1295,7 @@ if (-not $fault) {
         try { $needAlive = (([DateTime]::UtcNow - [DateTime]::Parse($state.lastAliveUtc).ToUniversalTime()).TotalMinutes -ge 60) } catch { }
     }
     if ($needAlive) {
-        $upMin = if ($null -ne $upSeconds) { [math]::Round($upSeconds/60) } else { '?' }
-        Log ("overwatch: alive; NinjaTrader up {0}min, feed guard {1}s, NT8 link {2}s, market data {3}s" -f $upMin, $arAge, $brAge, $feedAge)
+        Log (Format-AliveLine -UpSeconds $upSeconds -FeedGuardAge $arAge -LinkAge $brAge -FeedAge $feedAge)
         $state.lastAliveUtc = [DateTime]::UtcNow.ToString('o')
     }
     if ($state.killedAtUtc) { $state.killedAtUtc = '' }

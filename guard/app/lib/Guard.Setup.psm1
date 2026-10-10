@@ -19,7 +19,8 @@ function New-SetupRow([string]$Key, [string]$Title, [string]$State, [string]$Tex
 # What another watchdog runs, in its task's action or its command line: this PC's older relaunch and
 # overwatch scripts, cli-nt-bridge's watchdog, another copy of Guard. (nt8bridge watch / watchdog_detect_loop
 # only flatten naked positions - they never restart NinjaTrader, so they may stay.)
-$script:WatchdogPatterns = @('NT8-Relaunch', 'Relaunch-Watchdog', 'NT8-Overwatch', 'nt8bridge\s+watchdog', 'Guard-Relaunch\.ps1', 'Guard-Overwatch\.ps1')
+# Each names NinjaTrader's own watchdogs: a bare 'Relaunch-Watchdog' also matched a TWS relauncher (2026-10-10).
+$script:WatchdogPatterns = @('NT8-Relaunch', 'NT8-Overwatch', 'nt8bridge\s+watchdog', 'Guard-Relaunch\.ps1', 'Guard-Overwatch\.ps1')
 
 function Get-GuardOtherWatchdogs {
     # Something else that restarts NinjaTrader, switched on: two of them would each restart it and fight over
