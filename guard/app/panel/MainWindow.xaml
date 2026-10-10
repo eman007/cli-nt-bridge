@@ -289,7 +289,7 @@
                   <Button x:Name="TopicShow" DockPanel.Dock="Right" Content="Show" Style="{StaticResource Btn}" Margin="8,0,0,0"/>
                   <Grid>
                     <TextBox x:Name="NtfyTopic" Style="{StaticResource Input}" FontFamily="{StaticResource Mono}" Visibility="Collapsed"/>
-                    <TextBox x:Name="NtfyTopicMasked" Style="{StaticResource Input}" IsReadOnly="True" Foreground="{StaticResource Muted}"/>
+                    <TextBox x:Name="NtfyTopicMasked" Style="{StaticResource Input}" Foreground="{StaticResource Muted}"/>
                   </Grid>
                 </DockPanel>
                 <TextBlock Style="{StaticResource Help}" Margin="0,6,0,0"
@@ -304,7 +304,7 @@
                   <Button x:Name="WebhookShow" DockPanel.Dock="Right" Content="Show" Style="{StaticResource Btn}" Margin="8,0,0,0"/>
                   <Grid>
                     <TextBox x:Name="Webhook" Style="{StaticResource Input}" Visibility="Collapsed"/>
-                    <TextBox x:Name="WebhookMasked" Style="{StaticResource Input}" IsReadOnly="True" Foreground="{StaticResource Muted}"/>
+                    <TextBox x:Name="WebhookMasked" Style="{StaticResource Input}" Foreground="{StaticResource Muted}"/>
                   </Grid>
                 </DockPanel>
                 <TextBlock Style="{StaticResource Help}" Margin="0,6,0,0"

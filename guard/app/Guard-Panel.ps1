@@ -121,7 +121,14 @@ function Get-PanelXaml {
     return $win.Replace('<!--THEME-->', $inner).Replace('<!--PROTECTION_ROWS-->', (Get-ProtectionRowsXaml)).Replace('<!--PRIORITY_ROWS-->', (Get-PriorityRowsXaml))
 }
 
-function New-PanelWindow { return [Windows.Markup.XamlReader]::Parse((Get-PanelXaml)) }
+function New-PanelWindow {
+    $w = [Windows.Markup.XamlReader]::Parse((Get-PanelXaml))
+    # Read-only is set here, on the dependency property, not as an IsReadOnly attribute in the XAML: a clean
+    # Windows (2026-10-10) refused the whole window over that attribute ("Cannot set unknown member
+    # 'System.Windows.Controls.TextBox.IsReadOnly'") while the theme's IsReadOnly trigger loaded fine.
+    foreach ($n in 'NtfyTopicMasked', 'WebhookMasked') { $w.FindName($n).SetValue([Windows.Controls.Primitives.TextBoxBase]::IsReadOnlyProperty, $true) }
+    return $w
+}
 
 # Not C / R: 'r' is PowerShell's alias for Invoke-History, and an alias wins over a function.
 function Ui([string]$Name) { return $script:Win.FindName($Name) }

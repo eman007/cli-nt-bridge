@@ -60,6 +60,10 @@ function Click([string]$Name) { (Ui $Name).RaiseEvent((New-Object Windows.Routed
 '--- the window builds from the files'
 $w = Initialize-Panel -StatusArgs $sargs
 Check 'window built' ($w -is [Windows.Window]) ''
+# A clean Windows VM (2026-10-10) refused the whole window: its XAML reader called IsReadOnly on a
+# TextBox an "unknown member". The XAML sets no IsReadOnly; the code sets it on the property itself.
+Check 'the window XAML sets no IsReadOnly attribute (a clean Windows refused it)' ((Get-PanelXaml) -notmatch '<TextBox [^>]*IsReadOnly=') ''
+Check 'the masked topic and webhook boxes are still read-only' ((Ui 'NtfyTopicMasked').IsReadOnly -and (Ui 'WebhookMasked').IsReadOnly) ''
 $st = Get-GuardStatus -GuardHome $h.Home -Nt8Dir $h.Nt8 @sargs
 Check 'the pill shows the overall state' ((Ui 'OverallText').Text -eq $st.Overall.Text) "$((Ui 'OverallText').Text) vs $($st.Overall.Text)"
 $shown = @(@((Ui 'Cards').ItemsSource) | ForEach-Object { $_.Cards })
