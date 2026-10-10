@@ -526,6 +526,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                 // Suppress the alert AND the ladder (never inject into a maintenance/weekend/holiday window).
                 // The force-stall test trigger (now < _forceStallUntil) deliberately bypasses the gate so the
                 // ladder can still be exercised on demand at any hour.
+                // A new stall on what was the Simulated Data Feed a minute ago: re-read the providers first, so a
+                // switch to a broker since then puts the calendar back before it decides (final review I4).
+                if (stalled && _rung == 0 && _simFeedOnly) RefreshSimFeedOnly();
                 bool scheduledClosed = _useSessionGate && IsScheduledClosed(now);
                 if (stalled && now >= _forceStallUntil && scheduledClosed)
                 {
@@ -1042,6 +1045,16 @@ namespace NinjaTrader.NinjaScript.AddOns
             return true;
         }
 
+        // The answer holds still while a recovery runs (rung > 0): the drill's own rung-2 disconnect leaves the
+        // instruments with no provider for a moment, and flipping to "broker" there would make a Saturday read
+        // as a scheduled close - which abandons the episode with the feed left disconnected. Between recoveries
+        // it follows the providers. Pure, and tested in isolation by Test-StallGate.ps1.
+        internal static bool NextSimFeedOnly(bool current, int rung, IList<string> providerKinds)
+        {
+            if (rung > 0) return current;
+            return IsSimulatedFeedOnly(providerKinds);
+        }
+
         // The provider KIND (NinjaTrader's Provider enum) behind each watched instrument's feed.
         private void RefreshSimFeedOnly()
         {
@@ -1059,7 +1072,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     catch { kinds.Add(""); }
                 }
             }
-            bool now = IsSimulatedFeedOnly(kinds);
+            bool now = NextSimFeedOnly(_simFeedOnly, _rung, kinds);
             if (now != _simFeedOnly)
                 LogSafe(now ? "session: the watch list is on the Simulated Data Feed, which never closes - the market calendar is off"
                             : "session: the watch list is on a broker's feed - the market calendar applies");

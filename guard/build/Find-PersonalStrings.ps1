@@ -48,8 +48,10 @@ foreach ($f in $files) {
     $n = 0
     foreach ($line in $lines) {
         $n++
+        # A path is still a path when JSON escapes it (C:\\Users\\...) or a URL writes it with slashes.
+        $norm = $line.Replace('\\', '\').Replace('/', '\')
         foreach ($p in $patterns) {
-            if ($line -match $p) { "{0}:{1}: matches '{2}'" -f $f.FullName, $n, $p; $hits++ }
+            if ($line -match $p -or $norm -match $p) { "{0}:{1}: matches '{2}'" -f $f.FullName, $n, $p; $hits++ }
         }
         foreach ($s in $secrets) {
             if ($line.Contains($s) -or ($s -match '/([^/]+)$' -and $line.Contains($matches[1]))) {

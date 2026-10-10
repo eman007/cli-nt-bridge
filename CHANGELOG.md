@@ -25,11 +25,6 @@ All notable changes to this project are documented here. The format follows
   orders, `--reset` resets a simulation account; both re-read the account and report what cleared.
 - `nt8bridge.frontmonth` (the front contract from the clock) and `nt8bridge.output` (shared JSON output).
 
-### Fixed
-
-- `ghostorders --cancel` no longer reports success it never verified.
-- The NT8 link acts on every strategy row when several share a name.
-
 - **`optimize`, `walkforward`, `multiobjective`: NinjaTrader's own parameter search on the
   Strategy Analyzer tab, with a headless runner's option syntax.**
 
@@ -71,6 +66,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `ghostorders --cancel` no longer reports success it never verified.
+- The NT8 link acts on every strategy row when several share a name.
 - **Only the lease holder re-arms the driver lease — another bridge client can no longer
   keep a dead driver's lease alive.**
 

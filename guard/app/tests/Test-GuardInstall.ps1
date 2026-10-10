@@ -20,6 +20,7 @@ foreach ($f in 'NT8Guard-AddOns.zip', 'NT8 Guard - Setup Guide.pdf', 'NT8 Guard 
 Set-Content -LiteralPath (Join-Path $src 'app\Guard-Panel.ps1') -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
 
 function Install([string[]]$More = @()) {
+    $ErrorActionPreference = 'Continue'      # the installer's own error output is part of what we read, not a test crash
     $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $src 'app\Install-Guard.ps1') -Source $src -GuardHome $guardHome -StartMenuDir $menu -NoLaunch @More 2>&1
     return [pscustomobject]@{ Code = $LASTEXITCODE; Out = (@($out | ForEach-Object { "$_" }) -join "`n") }
 }
@@ -73,6 +74,39 @@ $r = Install
 $lock.Dispose()
 Check 'NinjaTrader being started: refused' ($r.Code -ne 0 -and $r.Out -match 'being started') $r.Out
 Check 'and nothing changed' ((Read-AllText (Join-Path $guardHome 'app\VERSION')) -eq '0.9.1') ''
+
+'--- never left half-done (final review I2)'
+# A run that died between its two renames left app.old and no app: the next run puts it back first,
+# even when it then refuses.
+[IO.Directory]::Move((Join-Path $guardHome 'app'), (Join-Path $guardHome 'app.old'))
+$panel = New-Object Threading.Mutex($true, 'Local\NT8GuardPanel')
+$r = Install
+$panel.ReleaseMutex(); $panel.Dispose()
+Check 'a previous version found as app.old is put back, even by a refused run' ($r.Code -ne 0 -and (Read-AllText (Join-Path $guardHome 'app\VERSION')) -eq '0.9.1' -and -not (Test-Path (Join-Path $guardHome 'app.old'))) $r.Out
+# The second rename fails (an antivirus or another handle on the fresh copy): the previous version goes back.
+$env:NT8GUARD_INSTALL_FAULT = 'app'
+$r = Install
+Remove-Item Env:\NT8GUARD_INSTALL_FAULT
+Check 'the new copy cannot be swapped in: the previous version is back, and the message says so' (
+    $r.Code -ne 0 -and (Read-AllText (Join-Path $guardHome 'app\VERSION')) -eq '0.9.1' -and $r.Out -match 'previous version' -and
+    -not (Test-Path (Join-Path $guardHome 'app.new')) -and -not (Test-Path (Join-Path $guardHome 'app.old'))) $r.Out
+# The old guide is open in a PDF reader: the program still updates; that one file is reported.
+$pdf = [IO.File]::Open((Join-Path $guardHome 'NT8 Guard - Setup Guide.pdf'), 'Open', 'Read', 'None')
+$r = Install
+$pdf.Dispose()
+Check 'a guide held open does not stop the update, and is named' ($r.Code -eq 0 -and (Read-AllText (Join-Path $guardHome 'app\VERSION')) -eq '0.9.2' -and $r.Out -match 'Setup Guide\.pdf') $r.Out
+
+'--- unblocks only what it ships (final review I3)'
+# Extracted with "Extract here" into Downloads: other downloads sit beside Install.cmd and must keep their mark.
+$other = Join-Path $src 'someone-elses-download.exe'; [IO.File]::WriteAllText($other, 'x')
+Set-Content -LiteralPath $other -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
+$otherDir = Join-Path $src 'Other stuff'; New-Item -ItemType Directory $otherDir | Out-Null
+$other2 = Join-Path $otherDir 'report.docx'; [IO.File]::WriteAllText($other2, 'x')
+Set-Content -LiteralPath $other2 -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
+Set-Content -LiteralPath (Join-Path $src 'python\backup_export.py') -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
+$r = Install
+Check 'its own files are unblocked' ($r.Code -eq 0 -and -not (Marked (Join-Path $src 'python\backup_export.py'))) $r.Out
+Check 'files that are not part of the release keep their mark' ((Marked $other) -and (Marked $other2)) ''
 
 '--- Install.cmd run from inside the zip (not extracted)'
 $lone = New-TestDir lone

@@ -36,6 +36,18 @@ $r = Invoke-Scan $tree
 Check 'a UTF-16 file -> found' ($r.Code -eq 1 -and $r.Out -match 'Install\.cmd') $r.Out
 Remove-Item (Join-Path $tree 'Install.cmd') -Force
 
+'=== a path written the way JSON or a URL writes it is still a path (final review C1)'
+$deny2 = Join-Path $root 'deny-path.txt'
+[IO.File]::WriteAllText($deny2, "C:\\Zqxj\\Repo\\`n")
+$tree2 = Join-Path $root 'tree2'; New-Item -ItemType Directory -Path $tree2 -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $tree2 'session.json'), '{ "cwd": "C:\\Zqxj\\Repo\\guard\\python" }')
+$out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scanner -Path $tree2 -DenyList $deny2 2>&1 | Out-String
+Check 'JSON-escaped backslashes -> found' ($LASTEXITCODE -eq 1 -and $out -match 'session\.json') $out
+Remove-Item (Join-Path $tree2 'session.json') -Force
+[IO.File]::WriteAllText((Join-Path $tree2 'notes.md'), 'see file:///C:/Zqxj/Repo/guard')
+$out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scanner -Path $tree2 -DenyList $deny2 2>&1 | Out-String
+Check 'forward slashes -> found' ($LASTEXITCODE -eq 1 -and $out -match 'notes\.md') $out
+
 '=== the live alert channel is caught but never printed'
 $cfgFile = Join-Path $root 'guard.json'
 [IO.File]::WriteAllText($cfgFile, "{ ""alerts"": { ""ntfyTopic"": ""$topic"" } }")

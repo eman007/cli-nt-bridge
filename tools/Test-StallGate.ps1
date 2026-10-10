@@ -23,6 +23,9 @@ $scheduled = Slice 'private bool IsScheduledClosed'       '        private DateT
 $calendar  = Slice '    // ===== BEGIN FeedGuardCalendar =====' '    // ===== END FeedGuardCalendar ====='
 $simfeed   = Slice 'internal static bool IsSimulatedFeedOnly' '        // The provider KIND'
 if ($scheduled -notmatch 'DayOfWeek.Saturday') { throw 'IsScheduledClosed slice did not capture the body' }
+# The stall path must refresh the Simulated-Data-Feed answer BEFORE the calendar gate reads it (final review I4).
+$tick = $src.Substring($src.IndexOf('bool scheduledClosed = _useSessionGate') - 600, 700)
+$onsetRefresh = ($tick -match 'RefreshSimFeedOnly\(\)') -and $tick.IndexOf('RefreshSimFeedOnly()') -lt $tick.IndexOf('bool scheduledClosed')
 
 $dir = Join-Path $env:TEMP 'stallgate'; New-Item -ItemType Directory -Force $dir | Out-Null
 $cs = @"
@@ -102,6 +105,19 @@ class H {
         S("a daily break on the Simulated Data Feed is OPEN", "2026-09-23 21:30", false);
         h._simFeedOnly = false;
         S("Saturday on a broker's feed is still CLOSED", "2026-09-26 12:00", true);
+
+        // ---- final review I4: the answer holds still while a recovery runs ----
+        Action<string,bool,bool,int,string[]> N = (label, want, cur, rung, kinds) => {
+            bool got = NextSimFeedOnly(cur, rung, new List<string>(kinds));
+            if (got == want) Console.WriteLine("  PASS  " + label);
+            else { fail++; Console.WriteLine("  FAIL  " + label + " -> got " + got + ", wanted " + want); }
+        };
+        N("the drill's own disconnect (no provider at rung 2) does not switch the calendar back on", true, true, 2, new[] { "" });
+        N("nor does a recovery on a broker switch it off", false, false, 1, new[] { "Simulator" });
+        N("between recoveries a switch to a broker turns the calendar on", false, true, 0, new[] { "Rithmic" });
+        N("between recoveries the Simulated Data Feed turns it off", true, false, 0, new[] { "Simulator" });
+        if ($(if ($onsetRefresh) { 'true' } else { 'false' })) Console.WriteLine("  PASS  a stall re-reads the feed's provider before the calendar decides");
+        else { fail++; Console.WriteLine("  FAIL  a stall re-reads the feed's provider before the calendar decides"); }
 
         Console.WriteLine(fail == 0 ? "RESULT: all checks passed" : "RESULT: " + fail + " FAILED");
         return fail == 0 ? 0 : 1;

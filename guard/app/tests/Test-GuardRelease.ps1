@@ -91,11 +91,25 @@ $pdf = Join-Path $render 'NT8 Guard - Setup Guide.pdf'
 Check 'renders to a PDF with its fonts, and a 1920x1080 Quick Start' ($LASTEXITCODE -eq 0 -and (Test-Path $pdf) -and (Get-Item $pdf).Length -gt 100KB -and
                                                                       (Test-Path (Join-Path $render 'NT8 Guard - Quick Start.png'))) ($out -join ' | ')
 
+'--- built from a commit, never from someone''s half-done edits (final review I5)'
+$repo = New-TestDir gitrepo
+& git -C $repo init -q 2>$null; & git -C $repo config user.email t@example.invalid; & git -C $repo config user.name test
+New-Item -ItemType Directory (Join-Path $repo 'guard\app') -Force | Out-Null; [IO.File]::WriteAllText((Join-Path $repo 'guard\app\a.ps1'), 'one')
+& git -C $repo add -A 2>$null; & git -C $repo commit -q -m first 2>$null
+$head = (& git -C $repo rev-parse HEAD).Trim()
+$b = Get-GuardBuildSource -Repo $repo -Paths @('guard', 'addon')
+Check 'a clean checkout: the commit, nothing dirty' ($b.Commit -eq $head -and -not @($b.Dirty).Count) "$($b.Commit) / $(@($b.Dirty) -join ',')"
+[IO.File]::WriteAllText((Join-Path $repo 'guard\app\a.ps1'), 'two'); [IO.File]::WriteAllText((Join-Path $repo 'guard\app\new.ps1'), 'x')
+[IO.File]::WriteAllText((Join-Path $repo 'elsewhere.txt'), 'not ours')
+$b = Get-GuardBuildSource -Repo $repo -Paths @('guard', 'addon')
+Check 'an edited or new file in what ships is reported; one elsewhere is not' ((@($b.Dirty) -join ',') -match 'a\.ps1' -and (@($b.Dirty) -join ',') -match 'new\.ps1' -and (@($b.Dirty) -join ',') -notmatch 'elsewhere') (@($b.Dirty) -join ',')
+
 '--- the staged release, its scan copy and its zip'
 # A fake Guard source tree (not a git checkout: the filesystem walk), with the junk a working tree holds.
 $gr = New-TestDir guardroot
 foreach ($f in 'app\Guard-Panel.ps1', 'app\Install-Guard.ps1', 'app\Guard-Run.vbs', 'app\VERSION', 'app\lib\Guard.Paths.psm1', 'app\tests\Test-X.ps1', 'app\.omc\state\x.json',
-               'app\lib\__pycache__\x.pyc', 'python\backup_export.py', 'python\tests\test_x.py', 'Install.cmd', 'LICENSE', 'THIRD-PARTY-NOTICES.txt') {
+               'app\lib\__pycache__\x.pyc', 'python\backup_export.py', 'python\tests\test_x.py', 'python\.omc\state\session-started.json',
+               'python\.pytest_cache\v\x', 'Install.cmd', 'LICENSE', 'THIRD-PARTY-NOTICES.txt') {
     $p = Join-Path $gr $f; New-Item -ItemType Directory (Split-Path $p) -Force | Out-Null; [IO.File]::WriteAllText($p, "file $f")
 }
 $addons = Join-Path (New-TestDir addons) 'NT8Guard-AddOns.zip'
@@ -104,12 +118,13 @@ $en = $za.CreateEntry('AddOns/AutoReconnect.cs'); $w = New-Object IO.StreamWrite
 $guideOut = New-TestDir guideout
 foreach ($f in 'NT8 Guard - Setup Guide.pdf', 'NT8 Guard - Quick Start.png') { [IO.File]::WriteAllText((Join-Path $guideOut $f), 'x') }
 $stage = Join-Path (New-TestDir stage) 'NT8Guard'
-$m = New-GuardStage -GuardRoot $gr -Dest $stage -PythonZip $z -AddOnsZip $addons -GuideDir $guideOut -Signature $signed
+$m = New-GuardStage -GuardRoot $gr -Dest $stage -PythonZip $z -AddOnsZip $addons -GuideDir $guideOut -Signature $signed -Commit 'abc1234def'
+Check 'the release says which commit it was built from' ((Read-AllText (Join-Path $stage 'README.txt')) -match 'abc1234def') ''
 $top = @(Get-ChildItem $stage | ForEach-Object Name | Sort-Object)
 $wantTop = @('app', 'Install.cmd', 'LICENSE', 'NT8 Guard - Quick Start.png', 'NT8 Guard - Setup Guide.pdf', 'NT8Guard-AddOns.zip', 'python', 'README.txt', 'THIRD-PARTY-NOTICES.txt') | Sort-Object
 Check 'the release layout, nothing else' (($top -join '|') -eq ($wantTop -join '|')) ($top -join ', ')
-$junk = @(Get-ChildItem $stage -Recurse -Force | Where-Object { $_.Name -in 'tests', '.omc', '__pycache__' -or $_.Extension -eq '.pyc' })
-Check 'no tests, hook state or caches' (-not $junk.Count) ($junk.FullName -join ', ')
+$junk = @(Get-ChildItem $stage -Recurse -Force | Where-Object { $_.Name -in 'tests', '__pycache__' -or $_.Name.StartsWith('.') -or $_.Extension -eq '.pyc' })
+Check 'no tests, hook state or caches - in app\ or python\ (final review C1)' (-not $junk.Count) ($junk.FullName -join ', ')
 Check 'the program, the runtime and the tools' ((Test-Path (Join-Path $stage 'app\Guard-Panel.ps1')) -and (Test-Path (Join-Path $stage 'python\python.exe')) -and (Test-Path (Join-Path $stage 'python\backup_export.py'))) ''
 Check 'it knows which files are the pinned runtime' ((@($m.RuntimeFiles) -contains 'python\python.exe') -and (@($m.RuntimeFiles) -notcontains 'python\backup_export.py')) (@($m.RuntimeFiles) -join ',')
 $scan = Join-Path (New-TestDir scan) 'tree'
@@ -122,14 +137,19 @@ $zr = [IO.Compression.ZipFile]::OpenRead($zip); $names = @($zr.Entries | ForEach
 Check 'zip entries use forward slashes, one per staged file' (-not @($names | Where-Object { $_.Contains('\') }).Count -and $names.Count -eq @(Get-ChildItem $stage -Recurse -File -Force).Count) "$($names.Count) entries"
 Check 'and it passes its own check' ((Test-GuardReleaseZip -ZipPath $zip).Ok) ((Test-GuardReleaseZip -ZipPath $zip).Problems -join '; ')
 $bad = Join-Path (New-TestDir badzip) 'bad.zip'
-$zb = [IO.Compression.ZipFile]::Open($bad, 'Create'); foreach ($n in 'app\Guard-Panel.ps1', 'python/python.exe') { $e = $zb.CreateEntry($n); $s = $e.Open(); $s.WriteByte(65); $s.Dispose() }; $zb.Dispose()
+$zb = [IO.Compression.ZipFile]::Open($bad, 'Create'); foreach ($n in 'app\Guard-Panel.ps1', 'python/python.exe', 'python/.omc/state/session.json') { $e = $zb.CreateEntry($n); $s = $e.Open(); $s.WriteByte(65); $s.Dispose() }; $zb.Dispose()
 $t = Test-GuardReleaseZip -ZipPath $bad
 Check 'a zip with a backslash entry or no Install.cmd is refused, saying which' (-not $t.Ok -and ($t.Problems -join ' ') -match 'backslash' -and ($t.Problems -join ' ') -match 'Install\.cmd') ($t.Problems -join '; ')
+Check 'and one carrying a dot-folder (tool or session state) is refused (final review C1)' (($t.Problems -join ' ') -match 'python/\.omc') ($t.Problems -join '; ')
 $inst = New-TestDir installed
 [IO.File]::WriteAllText((Join-Path $inst 'ok.ps1'), 'nothing to see')
 Check 'an installed tree that names nothing of the build machine passes' (-not @(Test-GuardInstalledTree -Root $inst -Forbidden @('C:\Fake\Repo')).Count) ''
 [IO.File]::WriteAllText((Join-Path $inst 'leak.ps1'), '$x = "C:\Fake\Repo\guard\app"')
 $p = @(Test-GuardInstalledTree -Root $inst -Forbidden @('C:\Fake\Repo'))
 Check 'one that names the repository is reported' ($p.Count -eq 1 -and $p[0] -match 'leak\.ps1') ($p -join '; ')
+Remove-Item (Join-Path $inst 'leak.ps1')
+[IO.File]::WriteAllText((Join-Path $inst 'session.json'), '{ "cwd": "C:\\Fake\\Repo\\guard\\python" }')
+$p = @(Test-GuardInstalledTree -Root $inst -Forbidden @('C:\Fake\Repo'))
+Check 'and so is one that names it JSON-escaped (final review C1)' ($p.Count -eq 1 -and $p[0] -match 'session\.json') ($p -join '; ')
 
 Complete-Test

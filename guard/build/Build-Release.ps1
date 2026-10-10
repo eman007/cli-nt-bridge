@@ -3,6 +3,8 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File guard\build\Build-Release.ps1 [-DenyList <file>]
 #
 # It refuses to produce a zip unless, in order:
+#   0. guard\ and addon\ hold no uncommitted change: the zip is that commit, named in its README.txt and
+#      in BUILD.txt beside it                                        (-AllowDirty names the zip -dirty)
 #   1. the Guard suite (incl. the add-ons' own tests: they compile against NinjaTrader's assemblies) and
 #      the Python suite pass;                                      (-SkipSuites names the zip -untested)
 #   2. the bundled Python matches its pinned SHA-256 and python.exe is signed by the Python Software Foundation;
@@ -12,7 +14,7 @@
 #   6. the finished zip installs into a clean temporary profile and works from there.
 # Output: guard\build\release\NT8Guard-v<version>.zip and SHA256SUMS.txt beside it.
 [CmdletBinding()]
-param([string]$DenyList, [string[]]$ConfigFile, [string]$OutDir, [string]$Python, [switch]$SkipSuites)
+param([string]$DenyList, [string[]]$ConfigFile, [string]$OutDir, [string]$Python, [switch]$SkipSuites, [switch]$AllowDirty)
 $ErrorActionPreference = 'Stop'
 $build = $PSScriptRoot
 $guard = Split-Path -Parent $build
@@ -33,13 +35,17 @@ if (-not $ConfigFile) {
 if (-not $OutDir) { $OutDir = Join-Path $build 'release' }
 if (-not $Python) { $Python = Join-Path $repo '.venv\Scripts\python.exe' }
 $version = ([IO.File]::ReadAllText((Join-Path $guard 'app\VERSION'))).Trim()
-$name = "NT8Guard-v$version" + $(if ($SkipSuites) { '-untested' } else { '' })
+$src = Get-GuardBuildSource -Repo $repo -Paths @('guard', 'addon')
+$name = "NT8Guard-v$version" + $(if ($SkipSuites) { '-untested' } else { '' }) + $(if (@($src.Dirty).Count -and $AllowDirty) { '-dirty' } else { '' })
 $work = Join-Path $build 'stage'
 $started = Get-Date
 function Step([string]$Text) { Write-Output ("[{0,4:N0}s] {1}" -f ((Get-Date) - $started).TotalSeconds, $Text) }
 function Refuse([string]$Text) { Write-Output ''; Write-Output "REFUSED: $Text"; exit 1 }
 
-Step "NT8 Guard $version -> $name.zip"
+Step "NT8 Guard $version -> $name.zip (commit $($src.Commit.Substring(0, 10)))"
+if (@($src.Dirty).Count -and -not $AllowDirty) {
+    Refuse ("uncommitted changes in what ships - commit them first (or -AllowDirty for a -dirty test zip): " + (@($src.Dirty | Select-Object -First 8) -join ', '))
+}
 if (Test-Path $work) { [IO.Directory]::Delete($work, $true) }
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 
@@ -82,7 +88,7 @@ if ($LASTEXITCODE -ne 0) { Refuse 'the guide did not render' }
 
 # 4. Stage, and scan everything that ships.
 Step 'staging'
-try { $stage = New-GuardStage -GuardRoot $guard -Dest (Join-Path $work $name) -PythonZip $pyZip -AddOnsZip $addons -GuideDir $guide } catch { Refuse $_.Exception.Message }
+try { $stage = New-GuardStage -GuardRoot $guard -Dest (Join-Path $work $name) -PythonZip $pyZip -AddOnsZip $addons -GuideDir $guide -Commit $src.Commit } catch { Refuse $_.Exception.Message }
 Step 'personal-strings scan'
 $scanDir = New-GuardScanTree -Stage $stage.Dest -RuntimeFiles $stage.RuntimeFiles -Dest (Join-Path $work 'scan')
 $scanArgs = @{ Path = $scanDir; DenyList = $DenyList }
@@ -105,5 +111,7 @@ if (-not $fresh.Ok) { [IO.File]::Delete($zip); Refuse "the fresh install: $($fre
 
 $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText((Join-Path $OutDir 'SHA256SUMS.txt'), "$sha  $name.zip`n")
+[IO.File]::WriteAllText((Join-Path $OutDir 'BUILD.txt'), ("$name.zip`ncommit $($src.Commit)`nbuilt $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm')) UTC`npython $PythonVersion (sha256 $PythonSha256)`n" +
+                                                         $(if (@($src.Dirty).Count) { "UNCOMMITTED CHANGES: $(@($src.Dirty) -join ', ')`n" } else { '' })))
 Step "DONE: $zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB), sha256 $sha"
 exit 0

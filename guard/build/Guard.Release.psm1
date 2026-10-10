@@ -30,10 +30,12 @@ function Get-GuardPythonRuntime {
 function Expand-GuardPython {
     # Unpack the runtime into -Dest (which must not exist yet) and copy the backup tools beside python.exe:
     # the embeddable runtime's ._pth puts its own folder on sys.path, so the tools import from there.
+    # -ToolFiles: the tools to copy, relative to -ToolsSource (the release passes what git tracks); without
+    # it every file but tests, caches and dot-folders (hook state) is copied.
     # -Signature { param($exe) -> @{ Status; Signer } } is a test seam; the default is Authenticode.
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Zip, [Parameter(Mandatory)][string]$Dest, [Parameter(Mandatory)][string]$ToolsSource,
-          [scriptblock]$Signature)
+          [string[]]$ToolFiles, [scriptblock]$Signature)
     if (-not $Signature) {
         $Signature = { param($exe) $s = Get-AuthenticodeSignature -FilePath $exe
                        [pscustomobject]@{ Status = [string]$s.Status; Signer = $(if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { '' }) } }
@@ -47,7 +49,13 @@ function Expand-GuardPython {
         $sig = & $Signature $exe
         if ($sig.Status -ne 'Valid') { throw "python.exe is not validly signed ($($sig.Status)): $Zip" }
         if ([string]$sig.Signer -notmatch 'Python Software Foundation') { throw "python.exe is signed by $($sig.Signer), not the Python Software Foundation: $Zip" }
-        Copy-GuardTree -From $ToolsSource -To $Dest -Skip @('tests', '__pycache__', 'README.md', '.pytest_cache')
+        if ($PSBoundParameters.ContainsKey('ToolFiles')) {
+            foreach ($rel in $ToolFiles) {
+                $to = Join-Path $Dest $rel
+                New-Item -ItemType Directory -Path (Split-Path $to) -Force | Out-Null
+                Copy-Item -LiteralPath (Join-Path $ToolsSource $rel) -Destination $to -Force
+            }
+        } else { Copy-GuardTree -From $ToolsSource -To $Dest -Skip @('tests', '__pycache__', 'README.md') }
     } catch {
         if (Test-Path $Dest) { [IO.Directory]::Delete($Dest, $true) }
         throw
@@ -56,34 +64,47 @@ function Expand-GuardPython {
 }
 
 function Copy-GuardTree {
-    # Copy a folder's files and subfolders, skipping any file or folder named in -Skip and every .pyc.
+    # Copy a folder's files and subfolders, skipping any file or folder named in -Skip, every dot-file and
+    # dot-folder (tool and hook state: .omc, .pytest_cache, .vscode) and every .pyc.
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$From, [Parameter(Mandatory)][string]$To, [string[]]$Skip = @())
     if (-not (Test-Path $To)) { New-Item -ItemType Directory -Path $To -Force | Out-Null }
     foreach ($item in Get-ChildItem -LiteralPath $From -Force) {
-        if ($Skip -contains $item.Name -or $item.Extension -eq '.pyc') { continue }
+        if ($Skip -contains $item.Name -or $item.Name.StartsWith('.') -or $item.Extension -eq '.pyc') { continue }
         $target = Join-Path $To $item.Name
         if ($item.PSIsContainer) { Copy-GuardTree -From $item.FullName -To $target -Skip $Skip }
         else { Copy-Item -LiteralPath $item.FullName -Destination $target -Force }
     }
 }
 
-function Get-GuardAppFiles {
-    # The app\ files that ship, relative to -GuardRoot: what git tracks when the root is a checkout (the
-    # personal-strings scan's contract - a working tree also holds hook state and caches), else every file
-    # but tests, hook state and caches. Never app\tests\.
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$GuardRoot)
-    $skip = { param($rel) $rel -match '(^|\\)(tests|\.omc|__pycache__|\.pytest_cache)(\\|$)' -or $rel -like '*.pyc' }
+function Get-GuardShipFiles {
+    # The files of one folder (app or python) that ship, relative to -GuardRoot: what git tracks when the
+    # root is a checkout (the personal-strings scan's contract - a working tree also holds hook state and
+    # caches), else every file. Either way never tests, caches, .pyc, or anything under a dot-folder or
+    # named with a leading dot (.omc hook state, .pytest_cache); for python\ never its README either.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$GuardRoot, [Parameter(Mandatory)][ValidateSet('app', 'python')][string]$Folder)
+    $skip = { param($rel) $rel -match '(^|\\)(tests|__pycache__|\.[^\\]*)(\\|$)' -or $rel -like '*.pyc' -or $rel -eq 'python\README.md' }
     $tracked = $null
     try {
         $inside = (& git -C $GuardRoot rev-parse --is-inside-work-tree 2>$null)
-        if ($LASTEXITCODE -eq 0 -and "$inside".Trim() -eq 'true') { $tracked = @(& git -C $GuardRoot ls-files -- app 2>$null | ForEach-Object { $_.Replace('/', '\') }) }
+        if ($LASTEXITCODE -eq 0 -and "$inside".Trim() -eq 'true') { $tracked = @(& git -C $GuardRoot ls-files -- $Folder 2>$null | ForEach-Object { $_.Replace('/', '\') }) }
     } catch { }
     if ($null -eq $tracked) {
         $root = [IO.Path]::GetFullPath($GuardRoot).TrimEnd('\')
-        $tracked = @(Get-ChildItem -LiteralPath (Join-Path $root 'app') -Recurse -File -Force | ForEach-Object { $_.FullName.Substring($root.Length + 1) })
+        $tracked = @(Get-ChildItem -LiteralPath (Join-Path $root $Folder) -Recurse -File -Force | ForEach-Object { $_.FullName.Substring($root.Length + 1) })
     }
     return @($tracked | Where-Object { -not (& $skip $_) })
+}
+
+function Get-GuardBuildSource {
+    # Which commit a release is built from, and what in -Paths differs from it (edited, added, removed,
+    # untracked - not ignored). The build copies the working tree, so in a checkout shared with other
+    # work an uncommitted edit would otherwise ship without a commit that names it.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Repo, [Parameter(Mandatory)][string[]]$Paths)
+    $commit = "$(& git -C $Repo rev-parse HEAD 2>$null)".Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $commit) { throw "$Repo is not a git checkout: a release is built from a commit" }
+    $dirty = @(& git -C $Repo status --porcelain --untracked-files=all -- @Paths 2>$null | ForEach-Object { "$_".Substring(3).Trim('"') })
+    return [pscustomobject]@{ Commit = $commit; Dirty = $dirty }
 }
 
 function New-GuardStage {
@@ -94,15 +115,16 @@ function New-GuardStage {
     # scan skips them).
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$GuardRoot, [Parameter(Mandatory)][string]$Dest, [Parameter(Mandatory)][string]$PythonZip,
-          [Parameter(Mandatory)][string]$AddOnsZip, [Parameter(Mandatory)][string]$GuideDir, [scriptblock]$Signature)
+          [Parameter(Mandatory)][string]$AddOnsZip, [Parameter(Mandatory)][string]$GuideDir, [scriptblock]$Signature, [string]$Commit)
     if (Test-Path $Dest) { [IO.Directory]::Delete($Dest, $true) }
     New-Item -ItemType Directory -Path $Dest -Force | Out-Null
-    foreach ($rel in Get-GuardAppFiles -GuardRoot $GuardRoot) {
+    foreach ($rel in Get-GuardShipFiles -GuardRoot $GuardRoot -Folder app) {
         $to = Join-Path $Dest $rel
         New-Item -ItemType Directory -Path (Split-Path $to) -Force | Out-Null
         Copy-Item -LiteralPath (Join-Path $GuardRoot $rel) -Destination $to
     }
-    $ex = @{ Zip = $PythonZip; Dest = (Join-Path $Dest 'python'); ToolsSource = (Join-Path $GuardRoot 'python') }
+    $tools = @(Get-GuardShipFiles -GuardRoot $GuardRoot -Folder python | ForEach-Object { $_.Substring('python\'.Length) })
+    $ex = @{ Zip = $PythonZip; Dest = (Join-Path $Dest 'python'); ToolsSource = (Join-Path $GuardRoot 'python'); ToolFiles = $tools }
     if ($Signature) { $ex.Signature = $Signature }
     Expand-GuardPython @ex | Out-Null
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -125,6 +147,7 @@ function New-GuardStage {
         ''
         'MIT licence (LICENSE). Third-party parts: THIRD-PARTY-NOTICES.txt.'
     )
+    if ($Commit) { $readme += @('', "Built from commit $Commit.") }
     [IO.File]::WriteAllText((Join-Path $Dest 'README.txt'), ($readme -join "`r`n") + "`r`n")
     return [pscustomobject]@{ Dest = $Dest; RuntimeFiles = $runtime }
 }
@@ -184,6 +207,9 @@ function Test-GuardReleaseZip {
     $problems = New-Object System.Collections.Generic.List[string]
     $back = @($names | Where-Object { $_.Contains('\') })
     if ($back.Count) { $problems.Add("$($back.Count) entr$(if ($back.Count -eq 1) { 'y uses' } else { 'ies use' }) a backslash (NinjaTrader-style importers and some unzip tools break on it): $(@($back | Select-Object -First 3) -join ', ')") }
+    # Nothing under a dot-folder or named with a leading dot ships: that is tool or session state (.omc, .vscode).
+    $dot = @($names | Where-Object { @($_ -split '[\\/]' | Where-Object { $_.StartsWith('.') }).Count })
+    if ($dot.Count) { $problems.Add("$($dot.Count) entr$(if ($dot.Count -eq 1) { 'y is' } else { 'ies are' }) tool or session state, not Guard: $(@($dot | Select-Object -First 3) -join ', ')") }
     $missing = @($Require | Where-Object { $names -notcontains $_ })
     if ($missing.Count) { $problems.Add("missing: $($missing -join ', ')") }
     return [pscustomobject]@{ Ok = (-not $problems.Count); Problems = $problems.ToArray() }
@@ -197,7 +223,12 @@ function Test-GuardInstalledTree {
     $out = New-Object System.Collections.Generic.List[string]
     foreach ($f in Get-ChildItem -LiteralPath $root -Recurse -File -Force | Where-Object { $_.Extension -in '.ps1', '.psm1', '.xaml', '.vbs', '.cmd', '.json', '.txt', '.py', '.md', '.ini', '.cfg', '._pth' }) {
         $text = [IO.File]::ReadAllText($f.FullName)
-        foreach ($s in $Forbidden) { if ($s -and $text.IndexOf($s, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $out.Add("$($f.FullName.Substring($root.Length + 1)): names $s") } }
+        $norm = $text.Replace('\\', '\').Replace('/', '\')        # as JSON escapes it, as a URL writes it
+        foreach ($s in $Forbidden) {
+            if ($s -and ($text.IndexOf($s, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $norm.IndexOf($s, [StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+                $out.Add("$($f.FullName.Substring($root.Length + 1)): names $s")
+            }
+        }
     }
     return $out.ToArray()
 }
@@ -251,5 +282,5 @@ function Invoke-GuardFreshInstall {
     return [pscustomobject]@{ Ok = (-not $problems.Count); Problems = $problems.ToArray(); Log = $log.ToArray() }
 }
 
-Export-ModuleMember -Function Get-GuardPythonRuntime, Expand-GuardPython, Copy-GuardTree, Get-GuardAppFiles, New-GuardStage, New-GuardScanTree,
+Export-ModuleMember -Function Get-GuardPythonRuntime, Expand-GuardPython, Copy-GuardTree, Get-GuardShipFiles, Get-GuardBuildSource, New-GuardStage, New-GuardScanTree,
                               Write-GuardReleaseZip, Test-GuardReleaseZip, Test-GuardInstalledTree, Invoke-GuardFreshInstall

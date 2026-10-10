@@ -27,8 +27,16 @@ $Source = [IO.Path]::GetFullPath($Source).TrimEnd('\')
 $srcApp = Join-Path $Source 'app'
 if (-not (Test-Path (Join-Path $srcApp 'Guard-Panel.ps1'))) { Fail "$Source does not hold NT8 Guard's app folder. Extract the whole zip, then run Install.cmd from it." }
 
-# 1. Mark-of-the-Web: before anything imports a module from the source.
-Get-ChildItem -LiteralPath $Source -Recurse -File -Force | Unblock-File -ErrorAction SilentlyContinue
+# The release's own files - the only ones this touches in -Source (it may be a Downloads folder full of
+# other people's files, extracted there with "Extract here").
+$releaseFiles = @('Install.cmd', 'NT8Guard-AddOns.zip', 'NT8 Guard - Setup Guide.pdf', 'NT8 Guard - Quick Start.png', 'LICENSE',
+                  'THIRD-PARTY-NOTICES.txt', 'README.txt')
+
+# 1. Mark-of-the-Web: before anything imports a module from the source. Only the release's own files: a
+#    mark removed from anything else would switch off Windows' download warnings for it.
+@(foreach ($d in 'app', 'python') { $dir = Join-Path $Source $d; if (Test-Path $dir) { Get-ChildItem -LiteralPath $dir -Recurse -File -Force } }) +
+@(foreach ($f in $releaseFiles) { $p = Join-Path $Source $f; if (Test-Path $p) { Get-Item -LiteralPath $p } }) |
+    Unblock-File -ErrorAction SilentlyContinue
 
 foreach ($m in 'Guard.Paths', 'Guard.Log', 'Guard.Config', 'Guard.Events', 'Guard.Alerts', 'Guard.Pause', 'Guard.Start') {
     Import-Module (Join-Path $srcApp "lib\$m.psm1") -DisableNameChecking
@@ -37,6 +45,15 @@ $guardDir = [IO.Path]::GetFullPath((Get-GuardHome $GuardHome)).TrimEnd('\')
 $version = ([IO.File]::ReadAllText((Join-Path $srcApp 'VERSION'))).Trim()
 Write-Output ''
 Write-Output "  NT8 Guard $version"
+
+# An earlier run that stopped between its two renames left <name>.old and no <name>: put the previous
+# version back before anything else (even before a refusal), so Guard's tasks always find a program.
+foreach ($n in 'app', 'python') {
+    $live = Join-Path $guardDir $n; $old = "$live.old"
+    if (-not (Test-Path $live) -and (Test-Path $old)) {
+        try { [IO.Directory]::Move($old, $live); Say "put back the previous $n\ (an earlier install stopped half-way)" } catch { }
+    }
+}
 
 # 2. Refusals.
 $m = $null
@@ -66,21 +83,40 @@ function Install-GuardFolder([string]$Name) {
             throw "$live is in use (a Guard task or a backup still running). Try again in a minute."
         }
     }
-    [IO.Directory]::Move($new, $live)
+    try {
+        if ($env:NT8GUARD_INSTALL_FAULT -eq $Name) { throw 'fault injected by a test' }   # test seam: the second rename fails
+        [IO.Directory]::Move($new, $live)
+    } catch {
+        # Never leave Guard without a program: the previous version goes back where the tasks look for it.
+        $why = $_.Exception.Message
+        if (-not (Test-Path $live) -and (Test-Path $old)) { try { [IO.Directory]::Move($old, $live) } catch { } }
+        if (Test-Path $new) { try { [IO.Directory]::Delete($new, $true) } catch { } }
+        $kept = $(if (Test-Path $live) { "The previous version of $Name\ is still installed and running." } else { "Run Install.cmd again: $live is missing." })
+        throw "the new $Name\ could not be swapped in ($why). $kept"
+    }
     if (Test-Path $old) { try { [IO.Directory]::Delete($old, $true) } catch { } }
     return "$Name\ installed"
 }
 
 # 3 and 4, holding the start lock so no start runs on a half-swapped program.
 try {
+    $swapped = @()
     foreach ($n in 'app', 'python') {
-        try { Say (Install-GuardFolder $n) } catch { Fail $_.Exception.Message }
+        try { Say (Install-GuardFolder $n); $swapped += $n }
+        catch {
+            $done = $(if ($swapped.Count) { " Already updated: $($swapped -join ', ')\ - run Install.cmd again to finish." } else { '' })
+            Fail ($_.Exception.Message + $done)
+        }
     }
-    foreach ($f in 'NT8Guard-AddOns.zip', 'NT8 Guard - Setup Guide.pdf', 'NT8 Guard - Quick Start.png', 'LICENSE', 'THIRD-PARTY-NOTICES.txt', 'README.txt') {
+    # Best effort: one of these held open (the old guide in a PDF reader) must not end an update whose
+    # program is already in place.
+    $skipped = @()
+    foreach ($f in $releaseFiles | Where-Object { $_ -ne 'Install.cmd' }) {
         $p = Join-Path $Source $f
-        if (Test-Path $p) { Copy-Item -LiteralPath $p -Destination (Join-Path $guardDir $f) -Force }
+        if (Test-Path $p) { try { Copy-Item -LiteralPath $p -Destination (Join-Path $guardDir $f) -Force -ErrorAction Stop } catch { $skipped += $f } }
     }
     Say "the NinjaTrader add-ons zip and the guide copied"
+    foreach ($f in $skipped) { Say "could not replace $f (is it open in another program?) - the previous copy stays" }
 } finally { $lock.Dispose() }
 
 # 5. The Start-menu shortcut: the panel through Guard-Run.vbs, so no console window flashes.
