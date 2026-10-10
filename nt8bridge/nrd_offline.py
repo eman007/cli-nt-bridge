@@ -79,6 +79,10 @@ def _integrity_errors(slots, out) -> list:
     errs = []
     if "L1" in out:
         _, mdt, price, vol = out["L1"]
+        # The slack comes from the SMALLEST tick among the active slots, not from the slot being
+        # checked: a damaged tick in one sparse slot must not widen its own range check.
+        ticks = [float(x["tick"]) for x in slots[:10] if x["count"] and float(x["tick"]) > 0]
+        slack = (min(ticks) if ticks else 0.0) + 1e-6
         for k in range(10):
             s = slots[k]
             if not s["count"]:
@@ -89,7 +93,12 @@ def _integrity_errors(slots, out) -> list:
             dv = int(vol[m].sum())
             if dv != int(s["volsum"]):
                 errs.append(f"L1[{k}] volume {dv} != header {int(s['volsum'])}")
-            if float(price[m].min()) < s["pmin"] - 1e-6 or float(price[m].max()) > s["pmax"] + 1e-6:
+            # One tick of slack: decoded prices sit on the tick grid, but the header's own min/max
+            # can be off-grid and the decoder can land on the neighbouring grid point. CME silver
+            # settlements carry 3 decimals (61.153, 22.388) on a 0.005 tick, and the LastClose slot
+            # (6) holds one, so a strict compare flagged clean SI days as corrupt. The volume check
+            # above is the real corruption detector.
+            if float(price[m].min()) < s["pmin"] - slack or float(price[m].max()) > s["pmax"] + slack:
                 errs.append(f"L1[{k}] price outside header range [{s['pmin']}, {s['pmax']}]")
     if "L2" in out:
         _, side, _, _, _, vol2 = out["L2"]
