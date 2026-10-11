@@ -77,6 +77,7 @@ def test_run_histdump_records_failures(tmp_path, monkeypatch):
     res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out, replay_dir=replay, engine="nt8")
     assert res["exported"] == []
     assert res["failed"] == [{"file": "MNQ 03-25/20241202", "error": "no replay data"}]
+    assert res["status"] == "partial" and "1 failed" in res["message"]   # not "ok" with a gap
 
 
 def test_depth_csv_to_parquet(tmp_path):
@@ -140,7 +141,7 @@ def test_run_histdump_timeout_is_recorded_not_fatal(tmp_path, monkeypatch):
         raise TimeoutError("no result within 300s")
     monkeypatch.setattr(histdump, "dump_one", fake_dump)
     res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=out, replay_dir=replay, engine="nt8")
-    assert res["status"] == "ok" and res["exported"] == []       # batch survives one date's timeout
+    assert res["status"] == "partial" and res["exported"] == []  # batch survives one date's timeout, says so
     assert res["failed"][0]["file"] == "MNQ 03-25/20241202"
     assert "timeout" in res["failed"][0]["error"]
 

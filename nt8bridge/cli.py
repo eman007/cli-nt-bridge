@@ -661,6 +661,9 @@ def _histdump(args) -> int:
     out = {"command": "histdump"}
     out.update(payload)
     print(json.dumps(out, indent=2))
+    # 2 = it ran, but not every day is in (failed / corrupt / truncated - see "message")
+    if payload.get("status") == "partial":
+        return 2
     return 0 if payload.get("status") in ("ok", "validated") else 1
 
 

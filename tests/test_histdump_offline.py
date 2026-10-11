@@ -67,6 +67,60 @@ def test_run_offline_flags_corrupt_and_writes_nothing(tmp_path):
     assert not (out / "2024" / "MNQ-2024_L1" / "20241207.parquet").exists()   # nothing written
 
 
+def _replay_with(tmp_path, days):
+    """A replay dir under MNQ 03-25 with {date: .nrd bytes}."""
+    contract = tmp_path / "replay" / "MNQ 03-25"
+    contract.mkdir(parents=True)
+    for date, raw in days.items():
+        (contract / f"{date}.nrd").write_bytes(raw)
+    return tmp_path / "replay"
+
+
+def _corrupt_nrd():
+    bad = bytearray(H.synthetic_nrd())
+    bad[H.HEADER_LEN + 3] = 0xFF          # the first L1 event's volume byte
+    return bytes(bad)
+
+
+def test_run_offline_clean_run_is_ok(tmp_path):
+    replay = _replay_with(tmp_path, {"20241207": H.synthetic_nrd()})
+    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=tmp_path / "parq", replay_dir=replay, engine="offline")
+    assert res["status"] == "ok" and res["count"] == 1 and "message" not in res
+    again = histdump.run_histdump(instrument_glob="MNQ*", out_dir=tmp_path / "parq", replay_dir=replay, engine="offline")
+    assert again["status"] == "ok" and again["count"] == 0      # nothing left to do is still ok
+
+
+def test_run_offline_corrupt_day_makes_the_run_partial(tmp_path):
+    # A skipped day used to come back as status "ok" (exit 0) with the day listed only under
+    # "corrupt": a script checking the status could not tell (silver false positives, PR #11).
+    replay = _replay_with(tmp_path, {"20241206": _corrupt_nrd(), "20241207": H.synthetic_nrd()})
+    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=tmp_path / "parq", replay_dir=replay, engine="offline")
+    assert res["status"] == "partial"
+    assert res["exported"] == ["MNQ/20241207"] and res["corrupt"][0]["file"] == "MNQ/20241206"
+    assert "1 corrupt" in res["message"] and "histget --force" in res["message"]
+
+
+def test_run_offline_truncated_day_is_written_but_partial(tmp_path):
+    # the clean prefix is still written (salvage), but the day is incomplete: say so in the status
+    replay = _replay_with(tmp_path, {"20241207": H.synthetic_nrd()[:-1]})
+    res = histdump.run_histdump(instrument_glob="MNQ*", out_dir=tmp_path / "parq", replay_dir=replay, engine="offline")
+    assert res["truncated"] and res["exported"] == ["MNQ/20241207"]
+    assert (tmp_path / "parq" / "2024" / "MNQ-2024_L1" / "20241207.parquet").exists()
+    assert res["status"] == "partial" and "1 truncated" in res["message"]
+
+
+def test_histdump_cli_exit_code_follows_the_status(tmp_path, capsys):
+    import json
+    from nt8bridge import cli
+    replay = _replay_with(tmp_path, {"20241206": _corrupt_nrd(), "20241207": H.synthetic_nrd()})
+    rc = cli.main(["histdump", "--instrument", "MNQ*", "--out", str(tmp_path / "parq"), "--replay-dir", str(replay)])
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "partial" and rc == 2           # 2 = it ran, but not every day is in
+    rc = cli.main(["histdump", "--instrument", "MNQ*", "--out", str(tmp_path / "parq"), "--replay-dir", str(replay)])
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "partial" and rc == 2           # the corrupt day is still missing on a re-run
+
+
 def test_histdump_cli_defaults_to_offline(monkeypatch):
     from nt8bridge import cli
     seen = {}

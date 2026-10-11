@@ -79,6 +79,27 @@ def _validation_gate(replay_dir, instrument_glob: str, out_dir, mode: str, timeo
             "detail": "no existing CSV to diff — gate skipped (construction-equivalence only)"}
 
 
+def _finish(result: dict) -> dict:
+    """Status "partial" (the CLI exits 2) when any day is not fully in: skipped as failed or corrupt,
+    or written incomplete (truncated - the clean prefix only). Before, such a run answered "ok" with
+    exit 0 and the gap sat only in the lists, so a script checking the status never saw it."""
+    corrupt = len(result.get("corrupt") or [])
+    failed = len(result.get("failed") or [])
+    trunc = len(result.get("truncated") or [])
+    if not (corrupt or failed or trunc):
+        return result
+    said = []
+    if corrupt or failed:
+        why = ", ".join(p for p in (f"{corrupt} corrupt" if corrupt else "", f"{failed} failed" if failed else "") if p)
+        said.append(f"{corrupt + failed} day(s) not exported ({why})")
+    if trunc:
+        said.append(f"{trunc} truncated (written incomplete, a re-run skips it)")
+    result["status"] = "partial"
+    result["message"] = ("; ".join(said) + " - the lists name each day; re-download them with histget --force,"
+                         " then run histdump again (with --force for a truncated day)")
+    return result
+
+
 def _offline_target(out_dir, sym, date, level):
     """Parquet path for one (sym, date, level) in the season-year layout."""
     from nt8bridge import nrd_offline as N
@@ -122,8 +143,8 @@ def _run_offline(*, instrument_glob, out_dir, replay_dir, levels, force):
             pq.write_table(tbl, tmp, compression="zstd")
             os.replace(tmp, out)
         exported.append(f"{sym}/{date}")
-    return {"status": "ok", "engine": "offline", "exported": exported,
-            "failed": failed, "truncated": truncated, "corrupt": corrupt, "count": len(exported)}
+    return _finish({"status": "ok", "engine": "offline", "exported": exported,
+                    "failed": failed, "truncated": truncated, "corrupt": corrupt, "count": len(exported)})
 
 
 def _validate_offline(*, instrument_glob, replay_dir, levels, timeout):
@@ -262,7 +283,7 @@ def run_histdump(*, instrument_glob: str, out_dir, replay_dir=None, mode: str = 
               "count": len(exported)}
     if warnings:
         result["warnings"] = warnings
-    return result
+    return _finish(result)
 
 
 def depth_csv_to_parquet(csv_path, parquet_path) -> int:

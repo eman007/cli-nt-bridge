@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **`histdump`: a run with any day failed, corrupt or truncated answers `status: "partial"` and
+  exits 2** (before: `ok` and exit 0, with the gap only in the `failed` / `corrupt` / `truncated`
+  lists - which is how the silver false positives below went unseen). A one-line `message` gives the
+  counts and what to do; `ok` / exit 0 now means every day is in, errors still exit 1. Exit 2 is
+  what the CLI already uses for "ran, found a problem". Both engines. A truncated day is still
+  written (the clean prefix); a later run skips it until `--force`. A script that treated any
+  non-zero exit as a hard failure will now stop on a partial run - check for 2.
+
 ### Fixed
 
 - **`histdump` no longer skips a clean `.nrd` as corrupt when the header's price range is off the
