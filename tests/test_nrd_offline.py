@@ -63,6 +63,41 @@ def test_integrity_catches_corruption():
     assert any("volume" in e for e in d["integrity_errors"])
 
 
+def _slots_with_lastclose(pmin, pmax, tick=0.005, volsum=3, lc_tick=None):
+    slots = [dict(count=0, first=0.0, tick=tick, t0=0, t1=0, pmax=0.0, pmin=0.0, volsum=0)
+             for _ in range(12)]
+    slots[2] = dict(count=1, first=50.0, tick=tick, t0=0, t1=0, pmax=50.0, pmin=50.0, volsum=1)
+    slots[6] = dict(count=1, first=pmin, tick=tick if lc_tick is None else lc_tick, t0=0, t1=0,
+                    pmax=pmax, pmin=pmin, volsum=volsum)
+    return slots
+
+
+def _l1_lastclose(price):
+    # one trade (slot 2, volume 1, inside the header range) and one LastClose event (slot 6)
+    return {"L1": (np.array([0, 1], dtype=np.int64), np.array([2, 6], dtype=np.int8),
+                   np.array([50.0, price]), np.array([1, 3], dtype=np.int64))}
+
+
+def test_integrity_offgrid_header_within_a_tick_is_clean():
+    # SI settlements are 3 decimals on a 0.005 tick; the decoder lands on a neighbouring grid
+    # point, up to ~0.6 tick from the header value (22.388 -> 22.385)
+    assert N._integrity_errors(_slots_with_lastclose(61.153, 61.153), _l1_lastclose(61.155)) == []
+    assert N._integrity_errors(_slots_with_lastclose(60.566, 60.566), _l1_lastclose(60.565)) == []
+    assert N._integrity_errors(_slots_with_lastclose(22.388, 22.642), _l1_lastclose(22.385)) == []
+
+
+def test_integrity_price_beyond_a_tick_still_flagged():
+    errs = N._integrity_errors(_slots_with_lastclose(61.153, 61.153), _l1_lastclose(61.17))
+    assert any("price outside header range" in e for e in errs)
+
+
+def test_integrity_inflated_tick_does_not_widen_its_own_check():
+    # a damaged tick (0.005 -> 327.68) on the LastClose slot must not become its own slack
+    errs = N._integrity_errors(_slots_with_lastclose(61.153, 61.153, lc_tick=327.68),
+                               _l1_lastclose(0.0))
+    assert any("price outside header range" in e for e in errs)
+
+
 def test_integrity_skipped_when_truncated():
     # a truncated file legitimately falls short of the header totals -> not flagged as corrupt
     raw = H.synthetic_nrd()

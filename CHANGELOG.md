@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`histdump` no longer skips a clean `.nrd` as corrupt when the header's price range is off the
+  tick grid.**
+
+  The offline integrity check compared each slot's decoded prices to the header's `pmin`/`pmax`
+  strictly. Decoded prices sit on the tick grid, but a header value need not: CME silver
+  settlements carry three decimals (61.153, 22.388) on a 0.005 tick, and the LastClose slot (6)
+  holds one. The decoder lands on a neighbouring grid point, up to 0.003 away (61.155; 22.385),
+  outside a header range such as [61.153, 61.153]. On one contract's 12 ordinary days, 6 were
+  reported under `corrupt` and written nowhere, with `status: ok` and exit 0; across 4,486 silver
+  files 6 more failed the same way. The range check now allows one tick, taken from the smallest
+  tick among the active slots (a damaged tick in one sparse slot cannot widen its own check). The
+  per-slot volume sum check, which is what catches byte damage, is unchanged. Tests cover an
+  off-grid header within a tick (clean), a price further away (still flagged) and an inflated
+  tick on the LastClose slot (still flagged).
 - NT8 Guard: *Finish setup* no longer refuses because of a relauncher for another program (an
   Interactive Brokers TWS one whose name holds `Relaunch-Watchdog`); only NinjaTrader watchdog names
   count.
