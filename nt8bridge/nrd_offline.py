@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import struct
+from collections import Counter
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -79,10 +80,14 @@ def _integrity_errors(slots, out) -> list:
     errs = []
     if "L1" in out:
         _, mdt, price, vol = out["L1"]
-        # The slack comes from the SMALLEST tick among the active slots, not from the slot being
-        # checked: a damaged tick in one sparse slot must not widen its own range check.
-        ticks = [float(x["tick"]) for x in slots[:10] if x["count"] and float(x["tick"]) > 0]
-        slack = (min(ticks) if ticks else 0.0) + 1e-6
+        # The slack is the smallest tick that at least TWO active slots (L1 or L2) carry - never one
+        # slot's own word: a damaged tick must not widen the check, and decode() prices with the
+        # first active slot's tick, so a damaged tick in a file's only active slot would otherwise
+        # pass its own garbage. Nothing to vouch for a tick = no slack (flagged, not written). Every
+        # real header checked (2,459 files) has several active slots sharing one tick.
+        seen = Counter(float(x["tick"]) for x in slots if x["count"] and float(x["tick"]) > 0)
+        shared = [t for t, n in seen.items() if n >= 2]
+        slack = (min(shared) if shared else 0.0) + 1e-6
         for k in range(10):
             s = slots[k]
             if not s["count"]:

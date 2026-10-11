@@ -98,6 +98,33 @@ def test_integrity_inflated_tick_does_not_widen_its_own_check():
     assert any("price outside header range" in e for e in errs)
 
 
+def _only_lastclose_nrd(tick):
+    # a file whose ONE active slot is LastClose (6): first = pmin = pmax = 61.153, one event that
+    # carries no price change and volume 3 (m1 = 1-byte volume, m2 = slot 6, info = L1)
+    head = bytearray(N.N_SLOTS * 80)
+    for s in range(N.N_SLOTS):
+        on = s == 6
+        v = 61.153 if on else 0.0
+        N.HDR.pack_into(head, s * 80, v, int(on), v, v, v, 1.0, tick, 0,
+                        638000000000000000, 638000000000000000, 3 if on else 0)
+    return bytes(head) + bytes([1 << 5, 6 << 5, 0xC0, 3])
+
+
+def test_integrity_damaged_tick_on_the_only_active_slot_is_flagged():
+    # With one active slot nothing vouches for its tick, and decode() prices with that same tick:
+    # 0.005 -> 327.68 decodes LastClose as 0.0. Taking the slack from it would pass the file, and the
+    # volume check cannot see a tick, so silently wrong prices would be written (review of PR #11).
+    raw = _only_lastclose_nrd(327.68)
+    d = N.decode(raw[N.N_SLOTS * 80:], N.parse_headers(raw[:N.N_SLOTS * 80]), want_l2=False)
+    assert d["L1"][2].tolist() == [0.0]
+    assert d["integrity_ok"] is False
+    # the price you pay: a lone off-grid slot gets no slack either (fail closed: flagged, not written).
+    # Every one of 2,459 real headers checked has two or more active slots sharing one tick.
+    raw = _only_lastclose_nrd(0.005)
+    d = N.decode(raw[N.N_SLOTS * 80:], N.parse_headers(raw[:N.N_SLOTS * 80]), want_l2=False)
+    assert d["L1"][2].tolist() == [61.155] and d["integrity_ok"] is False
+
+
 def test_integrity_skipped_when_truncated():
     # a truncated file legitimately falls short of the header totals -> not flagged as corrupt
     raw = H.synthetic_nrd()
