@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-10-15
+
 ### Added
 
 - **NT8 Guard 0.9.1: a system name on every alert.** Two PCs sending to one ntfy topic could not be
