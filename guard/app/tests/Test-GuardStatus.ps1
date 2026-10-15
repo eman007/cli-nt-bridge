@@ -344,7 +344,9 @@ Check 'no heartbeat: says why nothing is resolved' (@($w.Resolved).Count -eq 0 -
 $src = [IO.Path]::GetFullPath((Join-Path $script:AppDir '..\..\addon\AutoReconnect.cs'))
 if (Test-Path $src) {
     $m = [regex]::Match([IO.File]::ReadAllText($src), 'AddOnVersion\s*=\s*"([^"]+)"')
-    Check 'Guard expects the add-on version this repo builds' ($m.Success -and $m.Groups[1].Value -eq (Get-GuardExpectedFeedGuardVersion)) "$($m.Groups[1].Value) vs $(Get-GuardExpectedFeedGuardVersion)"
+    # At or above, not equal: the expected version is the oldest add-on Guard works with (5.0.1 only added
+    # the system name to push titles, and must not lock the fire drill out of a 5.0.0 add-on).
+    Check 'the add-on this repo builds is at least the version Guard needs' ($m.Success -and [version]$m.Groups[1].Value -ge [version](Get-GuardExpectedFeedGuardVersion)) "$($m.Groups[1].Value) vs $(Get-GuardExpectedFeedGuardVersion)"
 } else { '  (add-on source not beside this copy - version check skipped)' }
 
 Complete-Test

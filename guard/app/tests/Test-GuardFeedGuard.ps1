@@ -124,6 +124,7 @@ class T {
         Console.WriteLine("holidays=" + string.Join("|", ListCfg(txt, "holidays").ToArray()));
         Console.WriteLine("webhookFormat=" + StrCfg(txt, "webhookFormat", "?"));
         Console.WriteLine("webhookIsNtfy=" + StrCfg(txt, "webhookUrl", "").StartsWith("https://ntfy.sh/"));
+        Console.WriteLine("alertSource=" + StrCfg(txt, "alertSource", "?"));
         return 0;
     }
 }
@@ -137,5 +138,56 @@ Check 'the add-on reads the three switches' ($parsed.reconnect -eq 'True' -and $
 Check 'the add-on reads the session gate and time zone' ($parsed.useSessionGate -eq 'True' -and $parsed.marketTimeZoneId -eq 'Eastern Standard Time') "$($parsed.useSessionGate) $($parsed.marketTimeZoneId)"
 Check 'the add-on reads the extra dates' ($parsed.holidays -eq '2026-03-10') $parsed.holidays
 Check 'the add-on reads the alert channel' ($parsed.webhookFormat -eq 'text' -and $parsed.webhookIsNtfy -eq 'True') "$($parsed.webhookFormat) $($parsed.webhookIsNtfy)"
+Check 'the add-on reads the system name (blank in guard.json = the Windows name)' ($parsed.alertSource -eq $env:COMPUTERNAME) $parsed.alertSource
+
+'=== a list key written as ONE string (a hand-edited config, 2026-10-15)'
+# ListCfg looked for the next "[" ANYWHERE after the key: a plain string read as nothing, or as the
+# NEXT key's list when one followed.
+$code = @"
+using System; using System.Collections.Generic; using System.Globalization; using System.IO;
+class T {
+    static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+    static void LogSafe(string s) { }
+    $parsers
+    static int fails = 0;
+    static void Is(string name, List<string> got, string want) { string g = string.Join("|", got.ToArray()); if (g == want) Console.WriteLine("  PASS  " + name); else { fails++; Console.WriteLine("  FAIL  " + name + " -> [" + g + "]"); } }
+    static int Main() {
+        Is("a list", ListCfg("{\"a\": [\"X\", \"Y Z\"]}", "a"), "X|Y Z");
+        Is("one string = a list of one", ListCfg("{\"feedOwnerConnections\": \"Broker Feed\"}", "feedOwnerConnections"), "Broker Feed");
+        Is("one string never borrows the next key's list", ListCfg("{\"feedOwnerConnections\": \"Broker Feed\", \"exclude\": [\"Sim\"]}", "feedOwnerConnections"), "Broker Feed");
+        Is("an empty list", ListCfg("{\"a\": [], \"b\": [\"Q\"]}", "a"), "");
+        Is("a missing key", ListCfg("{\"b\": [\"Q\"]}", "a"), "");
+        Console.WriteLine(fails == 0 ? "RESULT: all checks passed" : "RESULT: " + fails + " FAILED");
+        return fails == 0 ? 0 : 1;
+    }
+}
+"@
+$out = @(Invoke-CSharpTest 'listcfg' $code)
+$out | Where-Object { "$_" -match 'PASS|FAIL' } | ForEach-Object { "$_" }
+Check 'the add-on reads a list key given as one string' ($script:CSharpExit -eq 0) ($out -join ' | ')
+
+'=== the feed guard''s own pushes carry the system name (two PCs on one topic, 2026-10-15)'
+$c = New-Cfg; $c.alerts.systemName = 'VPS'
+Check 'guard.json''s name goes to the add-on' ((ConvertTo-FeedGuardSettings $c).alertSource -eq 'VPS') ''
+$title = Get-AddOnSlice 'private static string HeaderSafe(' '        private void PostWebhook('
+$code = @"
+using System; using System.Text;
+class T {
+    $title
+    static int fails = 0;
+    static void Is(string name, string got, string want) { if (got == want) Console.WriteLine("  PASS  " + name); else { fails++; Console.WriteLine("  FAIL  " + name + " -> [" + got + "]"); } }
+    static int Main() {
+        Is("an alert, named", AlertTitle("VPS", true, "feed-dead"), "[VPS] NT8 ALERT - feed-dead");
+        Is("a recovery, named", AlertTitle("VPS", false, "recovered"), "[VPS] NT8 recovery - recovered");
+        Is("no name: as before", AlertTitle("", true, "x"), "NT8 ALERT - x");
+        Is("a name with non-ASCII is flattened for the header", AlertTitle("Caf\u00e9", true, "x"), "[Caf] NT8 ALERT - x");
+        Console.WriteLine(fails == 0 ? "RESULT: all checks passed" : "RESULT: " + fails + " FAILED");
+        return fails == 0 ? 0 : 1;
+    }
+}
+"@
+$out = @(Invoke-CSharpTest 'alerttitle' $code)
+$out | Where-Object { "$_" -match 'PASS|FAIL' } | ForEach-Object { "$_" }
+Check 'the add-on titles its pushes with the system name' ($script:CSharpExit -eq 0) ($out -join ' | ')
 
 Complete-Test

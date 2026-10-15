@@ -34,6 +34,24 @@ $w = $script:calls | Where-Object { $_.Uri -eq 'https://hooks.example.test/abc' 
 $j = $w.Body | ConvertFrom-Json
 Check 'json fields' ($j.title -eq 'Webhook' -and $j.severity -eq 'warn' -and $j.host -eq $env:COMPUTERNAME)
 
+'=== a system name of your own (two PCs on one topic, 2026-10-15)'
+$c.alerts.systemName = 'VPS'
+$script:calls = @()
+$null = Send-GuardAlert -Title 'NT8 is DOWN' -Body 'b' -Severity alert -Config $c -Sender $fake
+$n = $script:calls | Where-Object { $_.Uri -like 'https://ntfy.sh/*' }
+Check 'the title starts with the name you gave' ($n.Headers.Title -eq '[VPS] NT8 is DOWN') $n.Headers.Title
+$j = ($script:calls | Where-Object { $_.Uri -eq 'https://hooks.example.test/abc' }).Body | ConvertFrom-Json
+Check 'the webhook carries it, and the Windows name still' ($j.system -eq 'VPS' -and $j.host -eq $env:COMPUTERNAME) "$($j.system) $($j.host)"
+$script:calls = @()
+$null = Test-GuardAlert -Config $c -Sender $fake
+$n = $script:calls | Where-Object { $_.Uri -like 'https://ntfy.sh/*' }
+Check 'the test alert says which system sent it' ($n.Body -match '^Test alert from VPS ' -and $n.Headers.Title -eq '[VPS] NT8 Guard test') "$($n.Headers.Title) / $($n.Body)"
+$c.alerts.systemName = '   '
+$script:calls = @()
+$null = Send-GuardAlert -Title 't' -Body 'b' -Severity alert -Config $c -Sender $fake
+Check 'blank = the Windows name' (($script:calls | Where-Object { $_.Uri -like 'https://ntfy.sh/*' }).Headers.Title -eq "[$env:COMPUTERNAME] t") ''
+$c.alerts.systemName = ''
+
 '=== a failing send never throws and never leaks the topic or webhook address'
 $boom = { param($Uri) throw "could not reach $Uri" }
 $r = Send-GuardAlert -Title 't' -Body 'b' -Config $c -Sender $boom

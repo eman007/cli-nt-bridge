@@ -5,9 +5,9 @@
 **Keeps NinjaTrader 8 running on its own.** It starts NinjaTrader again and logs in when it closes or
 crashes, restarts it when it freezes, brings a dead market-data feed back, puts back strategies
 NinjaTrader dropped (onto their charts) - and tells your phone what it did. Windows 10/11, your own user
-account, no administrator rights. **Beta (0.9.0).**
+account, no administrator rights. **Beta (0.9.1).**
 
-- **Install:** download `NT8Guard-v0.9.0.zip` from the Releases page, *Extract All*, double-click
+- **Install:** download `NT8Guard-v0.9.1.zip` from the Releases page, *Extract All*, double-click
   `Install.cmd`. The setup wizard does the rest.
 - **The guide:** [NT8 Guard - Setup Guide.pdf](docs/guide/NT8%20Guard%20-%20Setup%20Guide.pdf) - every step
   with screenshots, what happens when NinjaTrader crashes or the feed dies, troubleshooting by symptom.

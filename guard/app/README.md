@@ -243,6 +243,10 @@ list what you change; everything else keeps its default:
 
 - `alerts.ntfyTopic` — your phone alerts (install the ntfy app and subscribe to the same name). Treat
   the name like a password: anyone who knows it can read your alerts.
+- `alerts.systemName` — the name that starts every alert title, `[VPS] NT8 is DOWN`, so two PCs sending
+  to one topic can be told apart (control panel: Alerts, *This PC's name in alerts*). Empty (the default)
+  = the Windows computer name. Plain letters, digits, spaces and punctuation, 40 at most, no quotes or
+  backslashes. The feed guard add-on's own pushes carry it too (add-on 5.0.1 and later).
 - `python.exe` — `auto` (the default) uses the Python bundled in Guard's `python\` folder. Set a path
   only to use another Python 3 (a checkout without the bundled runtime; the tests run on 3.14). Without any Python
   the start still happens, and the log says the backups could not run.
@@ -266,6 +270,7 @@ Write-FeedGuardConfig -Config (Get-GuardConfig)
 | Protection: *Recover a silent feed* | `autoRecover` |
 | Protection: *Re-enable strategies* | `reEnableAfterRecover` |
 | `alerts.ntfyTopic` (else `alerts.webhookUrl`) | `webhookUrl` + `webhookFormat` |
+| `alerts.systemName` (else the Windows name) | `alertSource` (starts each push title) |
 
 The add-on reads that file with a deliberately tiny parser (it does not unescape text), so a value
 of Guard's own holding a quote or a backslash is refused rather than written; your own keys are

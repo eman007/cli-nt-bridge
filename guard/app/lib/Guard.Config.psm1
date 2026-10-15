@@ -35,7 +35,8 @@ function Get-GuardDefaults {
                            bridgeTimeoutSeconds = 30; relauncherStaleSeconds = 180; dryRunRemedy = $false
                            dumpFullMemory = $true; dumpTimeoutSeconds = 180; dumpKeep = 2 }
         logKeeper     = @{ retentionDays = 7; livePruneDays = 3 }
-        alerts        = @{ ntfyServer = 'https://ntfy.sh'; ntfyTopic = ''; webhookUrl = ''
+        # systemName starts every alert title; '' = the Windows computer name.
+        alerts        = @{ ntfyServer = 'https://ntfy.sh'; ntfyTopic = ''; webhookUrl = ''; systemName = ''
                            priorities = @{ info = 3; warn = 4; alert = 5 } }
         watch         = @{ instruments = @('ES ##-##', 'NQ ##-##'); staleSeconds = 75
                            marketTimeZone = 'Eastern Standard Time'; extraDates = @() }
@@ -189,6 +190,15 @@ function Get-GuardConfig {
     return $cfg
 }
 
+function Get-GuardSystemName {
+    # The name that starts every alert title, so two PCs sending to one topic can be told apart:
+    # alerts.systemName, or the Windows computer name when it is blank.
+    [CmdletBinding()] param([Parameter(Mandatory)][hashtable]$Config)
+    $n = ([string]$Config.alerts.systemName).Trim()
+    if ($n) { return $n }
+    return [string]$env:COMPUTERNAME
+}
+
 function Get-GuardProtection {
     # The effective toggles: the named preset, then any explicit toggle. Plus crashDumps and the
     # effective preset name ('custom' when a toggle departs from the named preset).
@@ -231,6 +241,10 @@ function Test-GuardConfig {
     if ([string]$Config.alerts.ntfyServer -notmatch '^https?://[^\s/]+') { $bad.Add('alerts.ntfyServer must be an http(s) address') }
     if ([string]$Config.alerts.ntfyTopic -notmatch '^[A-Za-z0-9_-]{0,64}$') { $bad.Add('alerts.ntfyTopic may only use letters, digits, - and _ (64 at most)') }
     if ($Config.alerts.webhookUrl -and [string]$Config.alerts.webhookUrl -notmatch '^https?://\S+$') { $bad.Add('alerts.webhookUrl must be empty or an http(s) address') }
+    # It goes into an HTTP header and the feed guard's config file (no quotes or backslashes there).
+    if ([string]$Config.alerts.systemName -notmatch '^[\x20-\x7E]{0,40}$' -or [string]$Config.alerts.systemName -match '["\\]') {
+        $bad.Add('alerts.systemName may use plain letters, digits, spaces and punctuation, 40 at most, no quotes or backslashes')
+    }
     $inst = @($Config.watch.instruments | Where-Object { $_ -and ([string]$_).Trim() })
     if ($inst.Count -lt 1) { $bad.Add('watch.instruments needs at least one instrument') }
     if ([int]$Config.watch.staleSeconds -lt 30) { $bad.Add('watch.staleSeconds must be at least 30') }
@@ -264,4 +278,4 @@ function Save-GuardConfig {
 
 Export-ModuleMember -Function Get-GuardDefaults, ConvertTo-GuardHashtable, Merge-GuardHashtable, Get-GuardConfigPath,
                               Repair-GuardConfig, Get-GuardConfig, Get-GuardProtection, Get-GuardPreset, Test-GuardConfig,
-                              Save-GuardConfig
+                              Save-GuardConfig, Get-GuardSystemName

@@ -262,6 +262,7 @@ function Update-PanelProtectionView {
 function Show-PanelAlerts([hashtable]$Alerts) {
     (Ui 'NtfyServer').Text = [string]$Alerts.ntfyServer
     (Ui 'NtfyTopic').Text = [string]$Alerts.ntfyTopic
+    (Ui 'SystemName').Text = [string]$Alerts.systemName
     (Ui 'Webhook').Text = [string]$Alerts.webhookUrl
     foreach ($k in 'info', 'warn', 'alert') {
         $v = [int]$Alerts.priorities[$k]
@@ -322,6 +323,7 @@ function Show-PanelSettings {
 function Read-PanelAlerts([hashtable]$Config) {
     $Config.alerts.ntfyServer = ([string](Ui 'NtfyServer').Text).Trim()
     $Config.alerts.ntfyTopic = ([string](Ui 'NtfyTopic').Text).Trim()
+    $Config.alerts.systemName = ([string](Ui 'SystemName').Text).Trim()
     $Config.alerts.webhookUrl = ([string](Ui 'Webhook').Text).Trim()
     $pr = @{}
     foreach ($k in 'info', 'warn', 'alert') { $pr[$k] = @(1..5 | Where-Object { (Ui "Prio_${k}_$_").IsChecked })[0] }

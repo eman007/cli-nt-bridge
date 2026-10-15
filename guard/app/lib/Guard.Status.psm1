@@ -16,8 +16,11 @@ Import-Module (Join-Path $PSScriptRoot 'Guard.Events.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Guard.Alerts.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Guard.Overwatch.psm1')   # Get-BackupAdvice: one wording for missing strategies
 
-# The feed guard add-on version this Guard was built with (addon\AutoReconnect.cs AddOnVersion; a test
-# keeps the two equal). An older add-on in NinjaTrader is reported, with the import step as the remedy.
+# The OLDEST feed guard add-on this Guard works with: the Status note, the wizard's add-on light and the
+# fire drill (which follows the events 5.0.0 started writing) all gate on it, so raise it only when Guard
+# needs something an older add-on lacks - not for a cosmetic change such as 5.0.1's system name in push
+# titles. A test keeps addon\AutoReconnect.cs AddOnVersion at or above it. An older add-on in
+# NinjaTrader is reported, with the import step as the remedy.
 $script:ExpectedFeedGuardVersion = '5.0.0'
 $script:Labels = @{ relaunch = 'Relauncher'; overwatch = 'Overwatch'; feedguard = 'Feed guard'; login = 'Login'
                     guard = 'Guard'; logarchive = 'Log keeper'; panel = 'Panel' }

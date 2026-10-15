@@ -173,6 +173,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private string _alertSound = "Alert1.wav";  // in <install>\sounds (or absolute path); "" = silent
         private string _webhookUrl = "";            // optional POST target (phone push); "" = off
         private string _webhookFormat = "json";     // config "webhookFormat": "json" (default) | "text" (ntfy et al)
+        private string _alertSource = Environment.MachineName;   // config "alertSource": starts each push title
 
         // Build provenance. tools/deploy-nt8.ps1 rewrites this line IN THE DEPLOYED COPY ONLY (short commit
         // + UTC date); the repo keeps "dev". So a load banner reading build=dev means that file was
@@ -183,8 +184,9 @@ namespace NinjaTrader.NinjaScript.AddOns
         // The add-on's version, in the load banner, the heartbeat and the events. NT8 Guard compares it with
         // its own to tell you when the add-on inside NinjaTrader is older than the app (import the new one).
         // 5.0.0 = the first NT8 Guard build: events file, holidays by rule, NinjaTrader's own roll dates,
-        // the reload trigger; developer triggers removed.
-        internal const string AddOnVersion = "5.0.0";
+        // the reload trigger; developer triggers removed. 5.0.1 = the system name in push titles, and a list
+        // key written as one string ("feedOwnerConnections": "Broker Feed") read as a list of one.
+        internal const string AddOnVersion = "5.0.1";
 
         // Data-flow watchdog (catches a frozen feed where NT8 fires nothing and PriceStatus stays Connected).
         private List<string> _watchdogInstruments = new List<string>();   // empty => watchdog OFF
@@ -1969,6 +1971,15 @@ namespace NinjaTrader.NinjaScript.AddOns
             return flat.Length > 120 ? flat.Substring(0, 120) : flat;
         }
 
+        // "[VPS] NT8 ALERT - feed-dead": two PCs pushing to one ntfy topic must be told apart on the phone
+        // (2026-10-15). No source = the title as before.
+        private static string AlertTitle(string source, bool isAlert, string evt)
+        {
+            string t = "NT8 " + (isAlert ? "ALERT" : "recovery") + " - " + evt;
+            string src = HeaderSafe(source);
+            return HeaderSafe(src.Length > 0 ? "[" + src + "] " + t : t);
+        }
+
         private void PostWebhook(string evt, string message)
         {
             if (string.IsNullOrEmpty(_webhookUrl)) return;
@@ -1981,7 +1992,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             string body = textMode
                         ? message
                         : "{\"source\":\"AutoReconnect\",\"event\":" + JsonStr(evt) + ",\"message\":" + JsonStr(message)
-                          + ",\"utcTime\":" + JsonStr(DateTime.UtcNow.ToString("o")) + "}";
+                          + ",\"host\":" + JsonStr(_alertSource) + ",\"utcTime\":" + JsonStr(DateTime.UtcNow.ToString("o")) + "}";
             ThreadPool.QueueUserWorkItem(delegate
             {
                 try
@@ -1994,7 +2005,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                         // ntfy conventions; receivers that don't know these headers just ignore them.
                         try
                         {
-                            req.Headers.Add("X-Title", HeaderSafe("NT8 " + (isAlert ? "ALERT" : "recovery") + " - " + evt));
+                            req.Headers.Add("X-Title", AlertTitle(_alertSource, isAlert, evt));
                             req.Headers.Add("X-Priority", isAlert ? "4" : "3");
                             req.Headers.Add("X-Tags", isAlert ? "rotating_light" : "white_check_mark");
                         }
@@ -2109,6 +2120,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 _alertSound = StrCfg(txt, "alertSound", _alertSound);
                 _webhookUrl = StrCfg(txt, "webhookUrl", _webhookUrl);
                 _webhookFormat = StrCfg(txt, "webhookFormat", _webhookFormat);
+                _alertSource = StrCfg(txt, "alertSource", Environment.MachineName);
                 _autoRecover = BoolCfg(txt, "autoRecover", _autoRecover);
                 _resubSettleSeconds = NumCfg(txt, "resubSettleSeconds", _resubSettleSeconds);
                 _disconnectTimeoutSeconds = NumCfg(txt, "disconnectTimeoutSeconds", _disconnectTimeoutSeconds);
@@ -2241,8 +2253,21 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 int i = json.IndexOf("\"" + key + "\"", StringComparison.Ordinal);
                 if (i < 0) return outp;
-                int lb = json.IndexOf('[', i);
-                if (lb < 0) return outp;
+                // The VALUE after this key's colon - not the next "[" anywhere in the file, which read a
+                // plain string ("feedOwnerConnections": "Broker Feed") as nothing, or as
+                // the next key's list. One string = a list of one.
+                int colon = json.IndexOf(':', i + key.Length + 2);
+                if (colon < 0) return outp;
+                int v = colon + 1;
+                while (v < json.Length && char.IsWhiteSpace(json[v])) v++;
+                if (v < json.Length && json[v] == '"')
+                {
+                    int q = json.IndexOf('"', v + 1);
+                    if (q > v) { string one = json.Substring(v + 1, q - v - 1).Trim(); if (one.Length > 0) outp.Add(one); }
+                    return outp;
+                }
+                if (v >= json.Length || json[v] != '[') return outp;
+                int lb = v;
                 int rb = json.IndexOf(']', lb);
                 if (rb < 0) return outp;
                 foreach (string part in json.Substring(lb + 1, rb - lb - 1).Split(','))

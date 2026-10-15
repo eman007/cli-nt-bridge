@@ -4,6 +4,7 @@
 Import-Module (Join-Path $PSScriptRoot 'Guard.Paths.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Guard.Log.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Guard.Events.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Guard.Config.psm1')     # Get-GuardSystemName
 
 $script:DefaultSender = {
     param([string]$Uri, [hashtable]$Headers, [byte[]]$Body, [string]$ContentType)
@@ -36,8 +37,10 @@ function Send-GuardAlert {
     Enable-GuardTls12
     $a = $Config.alerts
     $res = [ordered]@{ ntfy = 'off'; webhook = 'off' }
-    # HTTP headers are ASCII; a non-ASCII title would make the whole request fail.
-    $tagged = ("[$env:COMPUTERNAME] $Title") -replace '[^\x20-\x7E]', '-'
+    # HTTP headers are ASCII; a non-ASCII title would make the whole request fail. The system name
+    # (alerts.systemName, else the Windows name) tells two PCs on one topic apart.
+    $system = Get-GuardSystemName $Config
+    $tagged = ("[$system] $Title") -replace '[^\x20-\x7E]', '-'
     $prio = [string]$a.priorities[$Severity]
     if (-not $prio) { $prio = @{ info = '3'; warn = '4'; alert = '5' }[$Severity] }
     if ($a.ntfyTopic) {
@@ -48,7 +51,7 @@ function Send-GuardAlert {
         } catch { $res.ntfy = 'failed: ' + (Hide-GuardSecret $_.Exception.Message $Config) }
     }
     if ($a.webhookUrl) {
-        $json = [ordered]@{ title = $Title; body = $Body; severity = $Severity; host = $env:COMPUTERNAME
+        $json = [ordered]@{ title = $Title; body = $Body; severity = $Severity; system = $system; host = $env:COMPUTERNAME
                             component = $Component; utc = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
         try {
             & $Sender ([string]$a.webhookUrl) @{} ([Text.Encoding]::UTF8.GetBytes($json)) 'application/json; charset=utf-8'
@@ -68,7 +71,9 @@ function Test-GuardAlert {
     if (-not $Config.alerts.ntfyTopic -and -not $Config.alerts.webhookUrl) {
         return [pscustomobject]@{ ok = $false; message = 'No alert channel is set up: alerts are only logged.' }
     }
-    $r = Send-GuardAlert -Title 'NT8 Guard test' -Body "Test alert from $env:COMPUTERNAME at $([DateTime]::UtcNow.ToString('u'))" `
+    $system = Get-GuardSystemName $Config
+    $from = $(if ($system -eq $env:COMPUTERNAME) { $system } else { "$system ($env:COMPUTERNAME)" })
+    $r = Send-GuardAlert -Title 'NT8 Guard test' -Body "Test alert from $from at $([DateTime]::UtcNow.ToString('u'))" `
                          -Severity info -Config $Config -Component guard -GuardHome $GuardHome -Sender $Sender
     $ok = ($r.ntfy -eq 'sent' -or $r.ntfy -eq 'off') -and ($r.webhook -eq 'sent' -or $r.webhook -eq 'off')
     return [pscustomobject]@{ ok = $ok; message = "phone (ntfy): $($r.ntfy); webhook: $($r.webhook)" }

@@ -13,7 +13,7 @@ Import-Module (Join-Path $PSScriptRoot 'Guard.Paths.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Guard.Config.psm1')
 
 $script:ManagedKeys = @('watchdogInstruments', 'watchdogStaleSeconds', 'marketTimeZoneId', 'holidays', 'useSessionGate',
-                        'reconnect', 'autoRecover', 'reEnableAfterRecover', 'webhookUrl', 'webhookFormat')
+                        'reconnect', 'autoRecover', 'reEnableAfterRecover', 'webhookUrl', 'webhookFormat', 'alertSource')
 # canaryInstrument / pokeSettleSeconds / netProbeUrl: read only by triggers removed in add-on 5.0.0.
 # watchdogInstrument (one name, before the list existed): the add-on falls back to it when the list is
 # empty, which would quietly undo an emptied watch list.
@@ -43,6 +43,7 @@ function ConvertTo-FeedGuardSettings {
     $s.reEnableAfterRecover = [bool]$p.reenableStrategies
     $s.webhookUrl = $url
     $s.webhookFormat = $format
+    $s.alertSource = Get-GuardSystemName $Config     # starts the feed guard's push titles (add-on 5.0.1+)
     return $s
 }
 

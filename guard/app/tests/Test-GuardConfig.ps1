@@ -106,13 +106,18 @@ $c.watch.staleSeconds = 10
 $c.login.helper = 'C:\nope\NTLogin.exe'
 $c.relaunch.maxActions = 0
 $c.protection.preset = 'yolo'
+$c.alerts.systemName = 'my "desk"'
 $probs = Test-GuardConfig $c
-foreach ($want in 'ntfyTopic', 'instruments', 'staleSeconds', 'login.helper', 'relaunch.maxActions', 'preset') {
+foreach ($want in 'ntfyTopic', 'instruments', 'staleSeconds', 'login.helper', 'relaunch.maxActions', 'preset', 'systemName') {
     Check "flags $want" ([bool]($probs -match [regex]::Escape($want))) ($probs -join '; ')
 }
 $bad = $false
 try { Save-GuardConfig $c } catch { $bad = $_.Exception.Message -match 'not saved' }
 Check 'an invalid object is refused, not saved' $bad
+$c = Get-GuardDefaults
+Check 'no system name by default (alerts then use the Windows name)' ($c.alerts.systemName -eq '' -and (Test-GuardConfig $c).Count -eq 0) ((Test-GuardConfig $c) -join '; ')
+foreach ($ok in 'VPS', 'Desk 2 (backup)', ('x' * 40)) { $c.alerts.systemName = $ok; Check "system name '$ok' accepted" ((Test-GuardConfig $c).Count -eq 0) ((Test-GuardConfig $c) -join '; ') }
+foreach ($no in ('x' * 41), "tab`there", 'back\slash', "caf$([char]0xE9)") { $c.alerts.systemName = $no; Check "system name '$no' refused" ([bool]((Test-GuardConfig $c) -match 'systemName')) '' }
 
 '=== save round-trips, atomically, without loadError'
 Remove-Item $path -Force

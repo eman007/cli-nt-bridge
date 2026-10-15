@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **NT8 Guard 0.9.1: a system name on every alert.** Two PCs sending to one ntfy topic could not be
+  told apart: the feed guard add-on titled its own pushes `NT8 ALERT - <event>` with no machine at
+  all, and Guard's alerts carried only the Windows computer name. `guard.json` `alerts.systemName`
+  (control panel: Alerts, *This PC's name in alerts*; empty = the Windows name) now starts every alert
+  title, `[VPS] NT8 is DOWN`; the webhook JSON carries `system` beside `host`, and the test alert says
+  which system sent it. Guard passes the name to the feed guard as `alertSource`, and **feed guard
+  5.0.1** starts its push titles with it. Guard still works with a 5.0.0 add-on (only its pushes lack
+  the name), so the fire drill and the setup wizard do not ask you to re-import for this.
+
 ### Changed
 
 - **`histdump`: a run with any day failed, corrupt or truncated answers `status: "partial"` and
@@ -39,6 +50,9 @@ All notable changes to this project are documented here. The format follows
 - NT8 Guard: the overwatch's hourly log line says `market data: none since the feed guard loaded`
   instead of `market data s` before the feed guard's first tick (a closed market, no connection).
 - NT8 Guard tests: the pause check no longer fails within 30 minutes of midnight UTC.
+- Feed guard add-on: a list setting written as one string (`"feedOwnerConnections": "Broker Feed"`)
+  was read as no value at all - or as the next setting's list when one followed. It now reads as a
+  list of one.
 
 ## [1.7.0] - 2026-10-10
 

@@ -99,9 +99,12 @@ Check 'saved priorities selected' ((Ui 'Prio_info_3').IsChecked -and (Ui 'Prio_w
 Click 'TopicNew'
 $newTopic = (Ui 'NtfyTopic').Text
 Check 'New topic makes a fresh private one' ($newTopic -match '^nt8guard-[a-z0-9]{22}$' -and $newTopic -ne $topic) $newTopic
+Check 'the system name box shows guard.json''s (blank = the Windows name)' ((Ui 'SystemName').Text -eq '') (Ui 'SystemName').Text
+(Ui 'SystemName').Text = '  VPS  '
 Click 'AlertSave'
 $cfg = Get-GuardConfig
 Check 'Save writes topic and priorities' ($cfg.alerts.ntfyTopic -eq $newTopic -and $cfg.alerts.priorities.warn -eq 5) "$($cfg.alerts.priorities | ConvertTo-Json -Compress)"
+Check 'Save writes the system name, trimmed' ($cfg.alerts.systemName -eq 'VPS') $cfg.alerts.systemName
 Check 'the message never shows the topic' ((Ui 'AlertMsg').Text -notmatch $newTopic) (Ui 'AlertMsg').Text
 $topic = $newTopic
 

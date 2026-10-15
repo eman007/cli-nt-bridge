@@ -294,6 +294,10 @@
                 </DockPanel>
                 <TextBlock Style="{StaticResource Help}" Margin="0,6,0,0"
                            Text="Anyone who knows the topic can read your alerts and send you fake ones. Keep it private, like a password: Guard never writes it into its logs."/>
+                <TextBlock Text="This PC's name in alerts" Style="{StaticResource Label}"/>
+                <TextBox x:Name="SystemName" Style="{StaticResource Input}"/>
+                <TextBlock Style="{StaticResource Help}" Margin="0,6,0,0"
+                           Text="Starts every alert title, so two PCs sending to one topic can be told apart - for example Desktop and VPS. Leave it empty for this PC's Windows name."/>
 
                 <TextBlock Text="HOW LOUD ON YOUR PHONE" Style="{StaticResource H2}" Margin="0,22,0,2"/>
                 <TextBlock Text="ntfy priority 1 (silent) to 5 (urgent, breaks through Do Not Disturb if you allow it in the app)." Style="{StaticResource Help}" Margin="0,0,0,8"/>
