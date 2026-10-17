@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-10-17
+
 ### Fixed
 
 - **NT8 Guard 0.9.2: a frozen Control Center is caught.** NinjaTrader runs its windows on several
