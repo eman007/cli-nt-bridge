@@ -208,5 +208,104 @@ function Find-DuplicateStrategyStarts {
     return [pscustomobject]@{ Duplicates = @($dups.ToArray()); NewestLocal = $newest }
 }
 
+function Read-Nt8Windows {
+    # Every top-level window of one process: @{ Title; Visible; Hung }. Only calls that send the target NO
+    # message - EnumWindows, GetWindowThreadProcessId, IsWindowVisible, InternalGetWindowText,
+    # IsHungAppWindow - because a probe that sends a message to a hung window hangs with it (GetWindowText
+    # did exactly that on 2026-08-25).
+    [CmdletBinding()] param([Parameter(Mandatory)][int]$ProcessId)
+    if (-not ('NT8Guard.WinHealth' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+namespace NT8Guard {
+    public static class WinHealth {
+        public class Win { public string Title; public bool Visible; public bool Hung; }
+        private delegate bool EnumProc(IntPtr h, IntPtr l);
+        [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc p, IntPtr l);
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int InternalGetWindowText(IntPtr h, StringBuilder s, int n);
+        [DllImport("user32.dll")] private static extern bool IsHungAppWindow(IntPtr h);
+        public static List<Win> ForProcess(int processId) {
+            List<Win> list = new List<Win>();
+            EnumWindows(delegate (IntPtr h, IntPtr l) {
+                uint pid; GetWindowThreadProcessId(h, out pid);
+                if (pid == (uint)processId) {
+                    StringBuilder sb = new StringBuilder(256); InternalGetWindowText(h, sb, 256);
+                    Win w = new Win(); w.Title = sb.ToString(); w.Visible = IsWindowVisible(h); w.Hung = IsHungAppWindow(h);
+                    list.Add(w);
+                }
+                return true;
+            }, IntPtr.Zero);
+            return list;
+        }
+    }
+}
+'@
+    }
+    return [NT8Guard.WinHealth]::ForProcess($ProcessId)
+}
+
+function Get-Nt8WindowHealth {
+    # Which of NinjaTrader's windows have stopped pumping messages, and whether the Control Center is one.
+    # NinjaTrader runs its windows on several UI threads - the Control Center on its own, charts and the
+    # other windows spread over the rest - so "is NinjaTrader responding" has no single answer, and
+    # Process.Responding tests only the topmost window. On the VPS on 2026-10-16 the Control Center's thread
+    # stayed stuck for almost 7 hours while that check, and both add-on heartbeats, stayed green.
+    # The Control Center is found by its title ("Control Center - <tab>"). On an install that translates
+    # the title it is not found; the overwatch then has only the strategy-list read, which alerts but
+    # never restarts NinjaTrader.
+    #   -Windows { -> @(@{ Title; Visible; Hung }) } replaces the Win32 read (tests).
+    # Returns @{ ControlCenterFound; ControlCenterHung; HungTitles }.
+    [CmdletBinding()] param([Parameter(Mandatory)][int]$ProcessId, [scriptblock]$Windows)
+    if (-not $Windows) { $Windows = { Read-Nt8Windows -ProcessId $ProcessId } }
+    # ForEach-Object unrolls both shapes: a list the reader returns, and one array object a test returns.
+    $all = @(& $Windows | ForEach-Object { $_ } | Where-Object { $_.Visible -and [string]$_.Title })
+    $cc = @($all | Where-Object { [string]$_.Title -match '^Control Center( - |$)' })
+    return [pscustomobject]@{
+        ControlCenterFound = ($cc.Count -gt 0)
+        ControlCenterHung  = (@($cc | Where-Object { $_.Hung }).Count -gt 0)
+        HungTitles         = @($all | Where-Object { $_.Hung } | ForEach-Object { [string]$_.Title } | Select-Object -Unique)
+    }
+}
+
+function Get-ControlCenterReadResult {
+    # What one strategy-list read through the NT8 link says about the Control Center:
+    #   ok          it answered;
+    #   timeout     the link reached the Control Center's dispatcher and it did not run the read within
+    #               the link's own bound ("... did not respond within 20s (saturated)") - the ONLY answer
+    #               that is evidence of a frozen Control Center;
+    #   unavailable anything else: no answer from the link at all (busy with a long job, or down), or an
+    #               error that is not a freeze (the Strategies tab closed, an NT8 update moved the grid).
+    # -WindowLongHung: the Control Center's window has not responded for several checks running. No answer
+    # is then a timeout too: the link's bound covers only the wait for the read to START, so a Control
+    # Center that froze in the middle of a read holds the link's request thread and nothing comes back.
+    # Returns @{ Result; Why }.
+    [CmdletBinding()] param($Response, [switch]$WindowLongHung)
+    if ($null -eq $Response) {
+        if ($WindowLongHung) { return [pscustomobject]@{ Result = 'timeout'; Why = 'the NT8 link did not answer while the Control Center window has not responded for several checks (the link is most likely stuck on it)' } }
+        return [pscustomobject]@{ Result = 'unavailable'; Why = 'the NT8 link did not answer' }
+    }
+    if ("$($Response.status)" -eq 'ok') { return [pscustomobject]@{ Result = 'ok'; Why = '' } }
+    $notes = @($Response.notes | ForEach-Object { [string]$_ })
+    if (@($notes | Where-Object { $_ -match 'did not respond within' }).Count) { return [pscustomobject]@{ Result = 'timeout'; Why = ($notes -join '; ') } }
+    $why = @($notes + @($Response.errors | ForEach-Object { [string]$_.message })) | Where-Object { $_ }
+    return [pscustomobject]@{ Result = 'unavailable'; Why = $(if ($why) { $why -join '; ' } else { "status $($Response.status)" }) }
+}
+
+function Get-ControlCenterStep {
+    # One cycle of a CONTROL_CENTER_HUNG fault: 'count' (not confirmed yet), 'alert' (the first page),
+    # 'wait', 'restart', or 'hold' (due for a restart, but only the strategy-list read is failing and the
+    # Control Center's window is not seen hung - never restart on one signal alone). -WindowHung is the
+    # caller's verdict over several checks, not one 5-second sample.
+    # The gap between the alert and the restart leaves room for a long compile in the NinjaScript Editor.
+    [CmdletBinding()] param([int]$Consecutive, [int]$AlertAt, [int]$RestartAt, [bool]$WindowHung)
+    if ($Consecutive -lt $AlertAt) { return 'count' }
+    if ($Consecutive -ge $RestartAt) { return $(if ($WindowHung) { 'restart' } else { 'hold' }) }
+    if ($Consecutive -eq $AlertAt) { return 'alert' }
+    return 'wait'
+}
+
 Export-ModuleMember -Function Get-OverwatchSettings, ConvertTo-GuardSeverity, Test-RelauncherFresh, Get-FeedEventUtc, Test-FeedGuardWritesEvents,
-                              Get-BackupAdvice, Invoke-BackupSave, Get-Nt8CurrentLog, Find-DuplicateStrategyStarts
+                              Get-BackupAdvice, Invoke-BackupSave, Get-Nt8CurrentLog, Find-DuplicateStrategyStarts,
+                              Read-Nt8Windows, Get-Nt8WindowHealth, Get-ControlCenterReadResult, Get-ControlCenterStep

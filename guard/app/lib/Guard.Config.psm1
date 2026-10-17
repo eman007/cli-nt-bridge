@@ -26,7 +26,9 @@ function Get-GuardDefaults {
         relaunch      = @{ graceMinutes = 3; stuckMinutes = 6; loginDeadSeconds = 90; maxActions = 4
                            windowMinutes = 30; backoffMinutes = 60; configUnlockWaitSeconds = 20 }
         thresholds    = @{ guardianStaleSeconds = 90; bridgeStaleSeconds = 180; feedStaleSeconds = 300
-                           consecutiveToAct = 3; cooldownMinutes = 20; backupEveryMinutes = 30 }
+                           consecutiveToAct = 3; cooldownMinutes = 20; backupEveryMinutes = 30
+                           # checks (one a minute) a frozen Control Center gets before the restart
+                           controlCenterRestartChecks = 10 }
         # The overwatch's finer timings (each explained where Guard-Overwatch.ps1 uses it).
         overwatch     = @{ startupGraceSeconds = 300; feedDeferMaxSeconds = 900; feedSourceOutageMaxSeconds = 1800
                            sourceVerdictMaxAgeMinutes = 20; restoreAfterAnyRestart = $true; restoreMaxAgeMinutes = 240

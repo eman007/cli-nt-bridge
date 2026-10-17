@@ -38,8 +38,11 @@
 # ============================================================================================
 #   EVERY probe must be bounded. This script exists because something blocked forever; an overwatch
 #   that can itself block is worthless. So:
-#     - never enumerate top-level windows or call GetWindowText: both block on WM_GETTEXT against a
-#       non-pumping UI thread, and both hung during the incident. A useful SYMPTOM but a fatal probe.
+#     - never ask NinjaTrader's windows anything by MESSAGE: WM_GETTEXT against a non-pumping UI thread
+#       blocks, and the NT8 link's windows/screenshot commands (GetWindowText from inside NinjaTrader)
+#       both hung during the incident. A useful SYMPTOM but a fatal probe. Reading the windows from
+#       out here is safe only with calls that send no message: EnumWindows, InternalGetWindowText,
+#       IsHungAppWindow (Read-Nt8Windows, for the Control Center check).
 #     - every bridge call and every web call takes an explicit timeout.
 #     - file reads only ever touch local paths.
 #
@@ -143,7 +146,10 @@ function Read-State {
                      restoredForStart = ''; verifyNames = ''; verifyUntil = ''; lastAliveUtc = ''
                      feedEpisodeUtc = ''; connAttemptUtc = ''; disableHandledUtc = ''
                      restoreDeferSinceUtc = ''; lockHoldAlertUtc = ''; downAlerted = ''; lastBackupUtc = ''
-                     dupScanLocal = ''; startNote = ''; noFeedGuardNoted = '' }
+                     dupScanLocal = ''; startNote = ''; noFeedGuardNoted = ''
+                     # strategy-list reads the Control Center timed out in a row; while above 0 every
+                     # cycle reads again. ccHungStreak: checks in a row its window was seen hung.
+                     gridFailStreak = 0; ccHungStreak = 0 }
     if (Test-Path $stateFile) {
         try { $j = Get-Content $stateFile -Raw | ConvertFrom-Json
               foreach ($k in @($s.Keys)) { if ($null -ne $j.$k) { $s[$k] = $j.$k } } } catch { }
@@ -1001,6 +1007,7 @@ $needsRestore = ($cfg.restoreStrategies -and $startUtc -and $state.restoredForSt
 
 if ($null -ne $upSeconds -and $upSeconds -lt $cfg.startupGraceSeconds) {
     if ($state.consecutive -gt 0) { $state.consecutive = 0; $state.fault = '' }
+    $state.gridFailStreak = 0; $state.ccHungStreak = 0     # a new NinjaTrader: nothing carries over
     # Do NOT make the strategies wait out the full grace. The grace exists because the HEARTBEATS are
     # stale while NinjaTrader boots - but a fresh add-on heartbeat (feed guard or NT8 link) proves the
     # add-ons are loaded and the grid is live, which is the only precondition a restore actually has.
@@ -1073,6 +1080,45 @@ if ($null -eq $arAge -and $arBuild -eq '') {
     if (-not $state.noFeedGuardNoted) { Log 'note: no feed guard heartbeat file - install the feed guard add-on, or the feed checks are blind'; $state.noFeedGuardNoted = 'yes' }
 } elseif ($state.noFeedGuardNoted) { $state.noFeedGuardNoted = '' }
 
+# THE CONTROL CENTER. NinjaTrader runs its windows on several UI threads and the Control Center has its
+# own. $responding tests only the topmost window, the NT8 link's heartbeat comes from the main application
+# thread and the feed guard's from a timer - so none of them sees the Control Center's thread stop. On the
+# VPS on 2026-10-16 it stayed stuck for 6h46m with all three green; the only probe on that thread, the
+# strategy-list read, failed 407 times and was logged as noise. Two signals now, and a fault needs the read:
+#   * its window not pumping (IsHungAppWindow - no message sent, see Get-Nt8WindowHealth), and
+#   * the strategy-list read, which runs on the Control Center's own dispatcher (bounded by the NT8 link).
+# The read is sent when the window looks hung or the last read timed out, and only while the NT8 link is
+# up: with the link down every read fails, and that is BRIDGE_DEAD / ADDON_NOT_LOADED, not a frozen window.
+# Only a TIMEOUT counts (Get-ControlCenterReadResult): no answer from a busy link, or a grid the link could
+# not find, says nothing about whether the Control Center is frozen - and re-reading it every minute would
+# cycle the Control Center's tabs every minute, the operation that wedged it on 2026-08-25. The exception
+# is no answer while the window itself has been hung for consecutiveToAct checks running (see below).
+$ccWin = $null
+try { $ccWin = Get-Nt8WindowHealth -ProcessId $nt.Id } catch { }
+$ccHung      = ($null -ne $ccWin -and $ccWin.ControlCenterHung)
+$ccHungNames = $(if ($null -ne $ccWin) { @($ccWin.HungTitles) -join ', ' } else { '' })
+$state.ccHungStreak = $(if ($ccHung) { [int]$state.ccHungStreak + 1 } else { 0 })
+$gridFailing = $false
+$linkUp      = ($null -ne $brAge -and -not $brNotLoaded -and -not $bridgeStale)
+if (-not $Report -and $linkUp -and ($ccHung -or [int]$state.gridFailStreak -gt 0)) {
+    $probe = Invoke-Bridge 'strategies' @{} $cfg.bridgeTimeoutSeconds
+    # The link's bound only covers the wait for the read to START: a Control Center that freezes in the
+    # middle of it holds the link's one request thread for good (its heartbeat beats on regardless), and
+    # every request then goes unanswered. With the window itself hung for consecutiveToAct checks running,
+    # an unanswered read is that case, and counts as a timeout.
+    $read = Get-ControlCenterReadResult $probe -WindowLongHung:([int]$state.ccHungStreak -ge [int]$cfg.consecutiveToAct)
+    switch ($read.Result) {
+        # ! NOT recorded here, though it is a good read: the restores below (feed episode, strategies a
+        #   connection drop switched off) must see the record as it was. RESTORE FIRST, RECORD SECOND.
+        'ok'      { $state.gridFailStreak = 0 }
+        'timeout' { $state.gridFailStreak = [int]$state.gridFailStreak + 1; $gridFailing = $true }
+        default {
+            $state.gridFailStreak = 0
+            Log "Control Center check: the strategy-list read is not available ($($read.Why)) - not counted"
+        }
+    }
+}
+
 # Faults listed in $alertOnly are reported but never acted on. Everything else can kill the process.
 $alertOnly = @('UI_HUNG', 'ADDON_NOT_LOADED')
 
@@ -1098,6 +1144,17 @@ elseif ($arNotLoaded -or $brNotLoaded) {
     $fault = 'ADDON_NOT_LOADED'
     $detail = "$($which -join ' and ') has not run since NinjaTrader started - it is not loaded, was removed, or failed to compile (often after a NinjaTrader update). A restart will not fix that, so NinjaTrader is left running. Open the NinjaScript Editor, press F5 to compile and fix any errors, or reinstall the add-on."
 }
+elseif ($gridFailing) {
+    # The Control Center did not answer the strategy-list read, while the NT8 link and the feed guard are
+    # alive. NOT alert-only: Get-ControlCenterStep pages first and restarts only after
+    # controlCenterRestartChecks, and only when the window is seen hung as well. Ranked above UI_HUNG on
+    # purpose - a topmost window that is also hung is no reason to wait on this one forever.
+    $fault = 'CONTROL_CENTER_HUNG'
+    $detail = $(if ($ccHung) { 'the Control Center window is not responding and its strategy list could not be read' }
+                else { 'the Control Center did not answer the strategy-list read (its window was not seen hung)' }) +
+              "; the NT8 link and the feed guard are alive, so only the Control Center's thread is stuck. " +
+              $(if ($ccHungNames) { "Windows not responding: $ccHungNames" } else { 'No window reported as not responding.' })
+}
 elseif ($uiHung) {
     # ! ALERT-ONLY, ON PURPOSE. A manual F5 in the NinjaScript editor makes NinjaTrader unresponsive
     #   for minutes and creates no NT8 link request, so the in-flight stand-down does not cover it.
@@ -1117,6 +1174,10 @@ elseif ($feedDead -and -not $feedDeferred) {
 $verdict = [ordered]@{
     base = $base
     utc = $now.ToString('o'); ntPid = $nt.Id; responding = $responding
+    controlCenterHung = $ccHung; windowsNotResponding = $ccHungNames
+    # -Report never sends the read (it would write a request file), so it cannot raise CONTROL_CENTER_HUNG
+    # itself; these say how far the scheduled runs have got.
+    controlCenterHungChecks = $state.ccHungStreak; controlCenterReadTimeouts = $state.gridFailStreak
     autoReconnectHeartbeatAgeSec = $arAge; autoReconnectRung = $arRung; autoReconnectBuild = $arBuild
     bridgeHeartbeatAgeSec = $brAge; lastL1AgeSec = $feedAge
     marketScheduledClosed = $closed; fault = $fault; detail = $detail
@@ -1129,7 +1190,10 @@ $state.downAlerted = ''; $state.startNote = ''
 # ---------------------------------------------------------------------------------------------
 # PENDING RESTORE - NinjaTrader came back after a restart; put the strategies back.
 # ---------------------------------------------------------------------------------------------
-if ($needsRestore -and $responding -and (Test-AddonsFresh)) {
+# ! Not while the Control Center is timing out: this block exits before any fault is counted, and its own
+#   grid read would fail every cycle - a restart into a frozen Control Center would go silent for good.
+#   The fault is counted below instead; the restore runs once the Control Center answers.
+if ($needsRestore -and $responding -and (Test-AddonsFresh) -and -not $gridFailing) {
     $why = $(if ($state.pendingRestore) { 'we restarted it' } else { 'restart we did not cause' })
     if (Invoke-StrategyRestore $why $upSeconds) {
         $state.restoredForStart = $startUtc; $state.pendingRestore = $false; $state.killedAtUtc = ''
@@ -1159,7 +1223,7 @@ if ($cfg.restoreStrategies -and -not $Report) {
             Log "feed episode OPEN (L1 ${feedAge}s, rung $arRung): any strategies NinjaTrader disables now are expected back when the feed returns"
         }
     }
-    elseif ($state.feedEpisodeUtc -and $responding) {
+    elseif ($state.feedEpisodeUtc -and $responding -and -not $gridFailing) {
         $openedFor = ''
         try { $openedFor = "$([math]::Round(([DateTime]::UtcNow - [DateTime]::Parse($state.feedEpisodeUtc).ToUniversalTime()).TotalMinutes))min" } catch { }
         Log "feed episode CLOSED after ${openedFor} (L1 ${feedAge}s): checking whether the strategies came back on their own"
@@ -1267,10 +1331,19 @@ if (-not $fault) {
         #   unanswerable.
         Log 'grid poll: reading Control Center strategies (touches the Control Center UI thread)'
         $r = Invoke-Bridge 'strategies' @{} $cfg.bridgeTimeoutSeconds
-        if ($null -ne $r -and $r.status -eq 'ok') {
+        $read = Get-ControlCenterReadResult $r
+        if ($read.Result -eq 'ok') {
             Update-StrategyCache $r.strategies 'periodic' | Out-Null
+            $state.gridFailStreak = 0
             Log 'grid poll: ok'
-        } else { Log 'grid poll: NO ANSWER (Control Center may be busy or wedged)' }
+        } elseif ($read.Result -eq 'timeout') {
+            # Evidence, not just a log line: the next cycle reads again in the Control Center check, and
+            # a timeout there is a CONTROL_CENTER_HUNG fault.
+            $state.gridFailStreak = [int]$state.gridFailStreak + 1
+            Log "grid poll: NO ANSWER - the Control Center did not run the read ($($read.Why))"
+        } else {
+            Log "grid poll: NO ANSWER ($($read.Why))"
+        }
     }
 
     # STRATEGY BACKUPS. The record above knows WHICH strategies to switch back on; it cannot recreate
@@ -1312,6 +1385,25 @@ Log "FAULT $fault ($($state.consecutive)/$($cfg.consecutiveToAct)) - $detail"
 if ($state.consecutive -lt $cfg.consecutiveToAct) { Write-State $state; exit 0 }
 if ($state.consecutive -eq $cfg.consecutiveToAct) {
     Write-GuardEvent -Component overwatch -Kind 'nt8.fault' -Severity warn -Text "$fault - $detail" -GuardHome $GuardHome
+}
+
+# A frozen Control Center pages at once, then gets controlCenterRestartChecks (a minute each) to come back
+# by itself - room for a long compile in the NinjaScript Editor - before the remedy below restarts it.
+if ($fault -eq 'CONTROL_CENTER_HUNG') {
+    # The window must have been seen hung on consecutiveToAct checks in a row, not on one 5-second sample:
+    # a thread that is merely busy for a few seconds in an otherwise "hold" episode is no reason to restart.
+    $windowHung = ([int]$state.ccHungStreak -ge [int]$cfg.consecutiveToAct)
+    $step = Get-ControlCenterStep -Consecutive $state.consecutive -AlertAt $cfg.consecutiveToAct -RestartAt $cfg.controlCenterRestartChecks -WindowHung $windowHung
+    $restartNote = $(if ($cfg.restartWhenFrozen) { "If it is still stuck after $($cfg.controlCenterRestartChecks) checks (about $($cfg.controlCenterRestartChecks) min), Guard saves a crash report and restarts NinjaTrader." }
+                     else { 'Restarting a frozen NinjaTrader is set to alert only in Protection, so Guard will not restart it.' })
+    if ($step -eq 'alert') {
+        Send-Alert 'NT8 Control Center not responding' "$detail`n`n$restartNote If you are compiling in the NinjaScript Editor, wait for it to finish." '5'
+    }
+    elseif ($step -eq 'hold') {
+        Send-AlertOnce "fault:${fault}:hold" 'NT8 Control Center not answering - NOT restarted' "$detail`n`nIts window was not seen hung on $($cfg.consecutiveToAct) checks in a row, so this may be the Control Center falling behind rather than a freeze. Guard does not restart NinjaTrader on the read alone - look at the box." '5'
+    }
+    if ($step -ne 'restart') { Write-State $state; exit 0 }
+    Log "CONTROL_CENTER_HUNG: still stuck after $($state.consecutive) checks with its window not responding -> remedy"
 }
 
 # Alert-only faults stop here: they get one push per episode, and never a remedy.
@@ -1384,8 +1476,9 @@ $dumpNote = $(if ($cfg.dumpBeforeKill) { "`nSaving a crash report first (up to $
 Send-Alert "NT8 $fault - restarting" "$detail`nExposure: $exposure$dumpNote`nKilling NinjaTrader; the relauncher will bring it back." '5'
 
 # Cache the enabled list one last time ONLY if the UI is still answering; if it is hung this call
-# would block, which is the one thing this script may never do.
-if ($responding) {
+# would block, which is the one thing this script may never do. A frozen Control Center is exactly the
+# window this read needs, so it is skipped then too - the record from its last good read stands.
+if ($responding -and $fault -ne 'CONTROL_CENTER_HUNG') {
     $r = Invoke-Bridge 'strategies' @{} 15
     if ($null -ne $r -and $r.status -eq 'ok') {
         $enabled = Update-StrategyCache $r.strategies 'pre-kill'
@@ -1421,5 +1514,6 @@ $state.pendingRestore = [bool]$cfg.restoreStrategies
 # the drift check does not also fire and race it with a second restore.
 $state.feedEpisodeUtc = ''
 $state.consecutive = 0; $state.fault = ''
+$state.gridFailStreak = 0; $state.ccHungStreak = 0    # the next NinjaTrader starts with a clean slate
 Write-State $state
 exit 0

@@ -151,7 +151,7 @@ figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-si
 <header class="masthead">
   <div class="masthead-inner">
     <div>
-      <div class="brand"><span class="label">NT8 Guard</span><span class="pill">BETA · v0.9.1</span></div>
+      <div class="brand"><span class="label">NT8 Guard</span><span class="pill">BETA · v0.9.2</span></div>
       <h1>NT8 Guard<br>Setup Guide</h1>
       <p class="lede">Keeps NinjaTrader 8 running on its own: starts it again and logs in when it closes or crashes, restarts it when it freezes, brings a dead market-data feed back, puts back strategies NinjaTrader dropped - and tells your phone what it did.</p>
     </div>
@@ -243,11 +243,11 @@ figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-si
     <section id="install">
       <div class="sec-head"><span class="label">Step 1</span><h2>Install</h2></div>
       <ol class="steps">
-        <li><div><p>Download <code>NT8Guard-v0.9.1.zip</code>, right-click it and choose <strong>Extract All…</strong>. Running <code>Install.cmd</code> from inside the zip does not work (it says so).</p></div></li>
+        <li><div><p>Download <code>NT8Guard-v0.9.2.zip</code>, right-click it and choose <strong>Extract All…</strong>. Running <code>Install.cmd</code> from inside the zip does not work (it says so).</p></div></li>
         <li><div><p>Double-click <strong>Install.cmd</strong> in the extracted folder. Windows may ask whether to run it, because it came from the internet: choose <strong>Run</strong> (or <strong>More info → Run anyway</strong>).</p></div></li>
         <li><div><p>It copies Guard into <code>%LOCALAPPDATA%\NT8Guard</code>, adds <strong>NT8 Guard</strong> to the Start menu, and opens the setup wizard. Nothing runs in the background yet: that starts at the wizard's last step.</p></div></li>
       </ol>
-      <div class="code"><pre>  NT8 Guard 0.9.1
+      <div class="code"><pre>  NT8 Guard 0.9.2
   app\ installed
   python\ installed
   the NinjaTrader add-ons zip and the guide copied
@@ -378,7 +378,7 @@ figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-si
           <thead><tr><th>Event</th><th>What Guard does (Recover NT8)</th></tr></thead>
           <tbody>
             <tr><td>NinjaTrader crashes or is closed</td><td>The relauncher puts back any strategies NinjaTrader dropped (on their charts), starts it and logs in - within about a minute. After the start the overwatch reconnects the connections that were connected before, one at a time.</td></tr>
-            <tr><td>NinjaTrader freezes</td><td>Proven over three checks a minute apart (window not answering and an add-on stopped), then restarted. A frozen window with both add-ons alive - usually you compiling a script - is only an alert.</td></tr>
+            <tr><td>NinjaTrader freezes</td><td>Proven over three checks a minute apart (window not answering and an add-on stopped), then restarted. A frozen window with both add-ons alive - usually you compiling a script - is only an alert. The Control Center is watched on its own (it can freeze while the charts keep working): frozen for three checks, an alert; still frozen after ten, a restart.</td></tr>
             <tr><td>A connection drops</td><td>The feed guard reconnects it. One you disconnect yourself stays off.</td></tr>
             <tr><td>Prices stop while the market is open</td><td>The feed guard re-subscribes; if prices stay silent it disconnects and reconnects the connection serving the watch list - unless that account holds a position (then it waits and alerts you). If that cannot fix it, the overwatch restarts NinjaTrader.</td></tr>
             <tr><td>A strategy vanishes from the list</td><td>Lost across a restart: put back automatically before the next start, on its chart. Removed by you within one session: listed as removed by you - nothing happens unless you press Bring back.</td></tr>

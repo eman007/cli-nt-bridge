@@ -137,7 +137,9 @@ function Get-GuardPanelPause {
 
 function Get-GuardStatus {
     # Everything the Status tab shows, as one object. Every outside fact can be passed in (tests do):
-    #   -Processes  { -> NinjaTrader processes in this session: @{ Id; StartUtc; Responding; Title } }
+    #   -Processes  { -> NinjaTrader processes in this session: @{ Id; StartUtc; Responding; Title; ControlCenterHung } }
+    #               Responding tests only the topmost window; ControlCenterHung is the Control Center's own
+    #               (it runs on a UI thread of its own - see Get-Nt8WindowHealth).
     #   -TaskState  { param($taskName) -> 'Ready' | 'Running' | 'Disabled' | $null (no such task) }
     #   -Nt8Version [version] or $null; 'auto' reads NinjaTrader.exe
     [CmdletBinding()]
@@ -153,7 +155,8 @@ function Get-GuardStatus {
             $sid = (Get-Process -Id $PID).SessionId
             , @(Get-Process -Name NinjaTrader -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sid } | ForEach-Object {
                 $start = $null; try { $start = $_.StartTime.ToUniversalTime() } catch { }
-                [pscustomobject]@{ Id = $_.Id; StartUtc = $start; Responding = $_.Responding; Title = $_.MainWindowTitle } })
+                $ccHung = $false; try { $ccHung = [bool](Get-Nt8WindowHealth -ProcessId $_.Id).ControlCenterHung } catch { }
+                [pscustomobject]@{ Id = $_.Id; StartUtc = $start; Responding = $_.Responding; Title = $_.MainWindowTitle; ControlCenterHung = $ccHung } })
         }
     }
     if (-not $TaskState) { $TaskState = { param($n) Get-CachedTaskState $n $now } }
@@ -218,6 +221,9 @@ function Get-GuardStatus {
         if (-not $nt.Responding) {
             $act = $(if ($prot.restartWhenFrozen) { 'Guard restarts it if it stays frozen' } else { 'Protection is set to alert only, so Guard will not restart it' })
             Set-Card $c bad 'Not responding' "$act. $detail".Trim()
+        } elseif ($nt.ControlCenterHung -eq $true) {
+            $act = $(if ($prot.restartWhenFrozen) { 'Guard restarts NinjaTrader if it stays frozen' } else { 'Protection is set to alert only, so Guard will not restart it' })
+            Set-Card $c bad 'Control Center not responding' "Other windows may still work. $act. $detail".Trim()
         } elseif ($nt.Title -eq 'Welcome') {
             Set-Card $c warn 'At its login window' "Waiting for the login to finish. $detail".Trim()
         } else {

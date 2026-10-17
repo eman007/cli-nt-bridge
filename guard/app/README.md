@@ -138,7 +138,11 @@ Only NinjaTrader and the lock screen of **your own** Windows session count.
 
 Every minute, while NinjaTrader is running, it checks signs of life that **stop** when something
 hangs - the feed guard's and the NT8 link's heartbeats, whether NinjaTrader's window still answers,
-and how old the last market-data tick is (only while the market is open). A problem must persist for 3
+whether the **Control Center** still answers, and how old the last market-data tick is (only while the
+market is open). The Control Center is checked on its own because NinjaTrader runs its windows on
+several threads: the Control Center can freeze while the charts, both heartbeats and the topmost
+window all look fine. Its window is read without sending NinjaTrader anything (a probe of a frozen
+window must not freeze too) and confirmed with a read of its strategy list. A problem must persist for 3
 checks in a row before it acts, and after a restart it waits 20 minutes before restarting again. Each
 problem pages your phone **once** (again after 6 hours if it is still there), not every minute.
 
@@ -146,6 +150,7 @@ problem pages your phone **once** (again after 6 hours if it is still there), no
 |---|---|
 | Window frozen **and** an add-on stopped, or an add-on's heartbeat stale | Restarts NinjaTrader (Protection: *Restart NT8 when it freezes*) |
 | Window frozen, add-ons alive (usually you compiling a script) | Alert only - never restarted |
+| The Control Center frozen: its strategy-list read times out (the NT8 link reached it and it did not run the read), add-ons alive | Alerts after 3 checks; still frozen after `thresholds.controlCenterRestartChecks` (default 10, one a minute) **and** its window seen not responding on the last 3 checks -> crash report (if on) and restart (Protection: *Restart NT8 when it freezes*). Read timing out but the window not seen hung: alert only. A read the link cannot make at all (it is busy, or the Strategies tab is closed) is logged, never counted - except no answer while the window has not responded for 3 checks running, which is a Control Center that froze in the middle of a read and holds the link with it. Found by its English title, *Control Center*: on a NinjaTrader that translates the title, only the read is there, so it alerts but never restarts |
 | No market data with the market open, and the feed guard could not fix it | Restarts NinjaTrader - but holds off while the feed guard is still trying, or when it blamed the data provider itself (a restart cannot fix that), up to a ceiling. A CME holiday or early close counts as closed: the feed guard's calendar says so in its heartbeat. Its verdicts come from its events file; a feed guard older than 5.0.0 writes none and is read from its log instead |
 | An add-on has not run at all since NinjaTrader started (not loaded, removed, or it failed to compile after an update) | Alert only - a restart cannot fix that |
 | The screen is locked, or *Start NinjaTrader when it is down* is off | Never restarts (nothing could bring NinjaTrader back); alerts instead |
@@ -167,8 +172,10 @@ can be double size) and alerts at once - only a NinjaTrader restart clears the e
 With *Save a crash report* on, it saves a memory dump of a frozen NinjaTrader before restarting it
 (`dumps\`, newest 2 kept, each can be several GB).
 
-`Guard-Overwatch.ps1 -Report` prints what it sees as JSON and changes nothing; `-TestAlert` pushes a
-test alert from this PC.
+`Guard-Overwatch.ps1 -Report` prints what it sees as JSON and changes nothing (including
+`controlCenterHung`, `windowsNotResponding`, and how many checks in a row the scheduled runs saw the
+window hung and the read time out - `-Report` never sends the read itself, so it never reports
+CONTROL_CENTER_HUNG on its own); `-TestAlert` pushes a test alert from this PC.
 
 ## How the password is entered
 

@@ -6,6 +6,37 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **NT8 Guard 0.9.2: a frozen Control Center is caught.** NinjaTrader runs its windows on several
+  UI threads. The Control Center can freeze on its own while the rest of NinjaTrader keeps running.
+  Guard never saw it:
+  - `Process.Responding` tests only the topmost window.
+  - Both heartbeats (the NT8 link's and the feed guard's) come from other threads.
+  - Guard logged a failed strategy-list read but never counted it.
+
+  A Control Center frozen for almost 7 hours raised no alert, and the strategy record went stale.
+  The record was too old to restore from, so after the manual restart every strategy came back off.
+  What 0.9.2 does:
+  - **Finds the Control Center window and tests it** with `IsHungAppWindow`, which sends NinjaTrader
+    no message. The window is found by its English title.
+  - **Reads the strategy list** when that window is hung or the last read timed out.
+  - **Counts a read timeout as a fault.** A read that gets no answer counts only once the window has
+    been hung for 3 checks running. A Control Center that freezes in the middle of a read holds up
+    the NT8 link's requests while the link's heartbeat keeps beating.
+  - **New fault `CONTROL_CENTER_HUNG`:** pages after 3 checks. Restarts NinjaTrader (dump first,
+    when crash dumps are on) after `thresholds.controlCenterRestartChecks` checks (default 10), and
+    only while the window is hung. While the window still answers, Guard sends a page and holds
+    instead of restarting.
+
+  Also in this release:
+  - A pending restore no longer hides the fault.
+  - The control panel's NinjaTrader card shows *Control Center not responding*.
+  - `-Report` adds `controlCenterHung`, `windowsNotResponding` and the two counters.
+
+  Limit: a NinjaTrader that translates the Control Center's title gets the read checks and the
+  alerts, never the restart.
+
 ## [1.7.1] - 2026-10-15
 
 ### Added
