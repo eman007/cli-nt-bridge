@@ -2830,16 +2830,16 @@ namespace NinjaTrader.NinjaScript.AddOns
                 }
             }
             sb.Append("},\"trades\":[");
+            StopIndex stops = null;
             if (all != null)
             {
-                // Per-day absolute stop levels, recovered from the backtest's StopMarket
-                // orders (e.g. EventFadeNFP's "EFStop"). The stop appears in the order
-                // history whether it FILLED (stop exit) or was CANCELLED (time exit), so
-                // this gives a stop LEVEL for time-exit days too -- the parity comparator
-                // checks the stop as an order LEVEL, and on a time-exit day it is absent
-                // from the exit execution. Built once per run; defensive (empty on any
-                // API hiccup -> stops fall back to the exit order's StopPrice, else null).
-                Dictionary<DateTime, double> stopByDate = BuildStopByDate(perf);
+                // Each trade's absolute stop level, from the backtest's protective stop orders
+                // (e.g. EventFadeNFP's "EFStop"). The stop is in the order history whether it
+                // FILLED (stop exit) or was CANCELLED (time or target exit), so a time-exit trade
+                // gets its stop LEVEL too -- the parity comparator checks the stop as an order
+                // LEVEL, and on a time exit it is absent from the exit execution. Built once per
+                // run; defensive (empty on any API hiccup -> only stop exits get a level).
+                stops = BuildStopIndex(perf);
 
                 int cap = nTrades < 5000 ? nTrades : 5000;
                 for (int i = 0; i < cap; i++)
@@ -2857,74 +2857,239 @@ namespace NinjaTrader.NinjaScript.AddOns
                       .Append(",\"entryPrice\":").Append(SafeNum(delegate { return t.Entry.Price; }))
                       .Append(",\"exitPrice\":").Append(SafeNum(delegate { return t.Exit.Price; }))
                       .Append(",\"exitName\":").Append(JsonStr(SafeStr(delegate { return t.Exit.Order.Name; })));
-                    double stp = ResolveStop(t, stopByDate);
+                    double stp = ResolveStop(t, stops);
                     if (!double.IsNaN(stp))
                         sb.Append(",\"stopPrice\":").Append(Num(stp));
                     sb.Append("}");
                 }
             }
-            sb.Append("]}");
+            sb.Append("]");
+            // The stop orders the matching saw, and how many carried their history (Order.OrderUpdates):
+            // MatchStop reads Order.Time differently with and without it.
+            if (stops != null)
+                sb.Append(",\"stopOrders\":{\"count\":").Append(stops.Count).Append(",\"withHistory\":").Append(stops.WithHistory).Append("}");
+            sb.Append("}");
             return sb.ToString();
         }
 
-        // Build {date -> absolute stop price} from the backtest's StopMarket orders. The
-        // strategy attaches an absolute StopMarket to each entry; it is in the order
-        // history whether it FILLED (stop exit) or was CANCELLED (time exit), so this
-        // recovers the stop LEVEL for every trading day, including time-exit days where the
-        // stop is absent from the exit execution. One trade/day for the event strategies,
-        // so date-keying is unambiguous. Defensive: any API/reflection hiccup degrades to an
-        // empty map (callers then fall back to the exit order's StopPrice on stop days).
-        private static Dictionary<DateTime, double> BuildStopByDate(SystemPerformance perf)
+        // One stop order of the run as the matching needs it: plain data, no NinjaTrader types,
+        // so tools\Test-BacktestStops.ps1 compiles and runs MatchStop on its own.
+        // (Until 2026-10 the stops were keyed by calendar DAY - right for the one-trade-a-day event
+        // strategies it was written for, wrong for any other: every trade of a day got that day's
+        // first stop, a stop-market ENTRY counted as a stop, and the day's stop even overrode the
+        // price of the stop a trade actually exited on.)
+        // ! What Order.Time means depends on whether NinjaTrader kept the order's history. With history
+        //   (Order.OrderUpdates) it is the LAST change of state - for a stop that is gone, its cancel or
+        //   fill (NinjaTrader's help; Order.Update sets it) - and the first update is when it was placed.
+        //   A Strategy Analyzer order has NO history, and its Order.Time stays the time it was placed:
+        //   a YM backtest of 226 trades (2026-10-19) put every cancelled stop BEFORE its trade's exit,
+        //   and reading it as a cancel time handed 44 target exits the next trade's stop.
+        internal struct StopCandidate
         {
-            var map = new Dictionary<DateTime, double>();
-            try
-            {
-                IEnumerator<Order> orders = perf.GetBacktestOrdersReverse();
-                if (orders == null) return map;
-                try
-                {
-                    while (orders.MoveNext())
-                    {
-                        Order o = orders.Current;
-                        try
-                        {
-                            if (o == null || o.OrderType != OrderType.StopMarket) continue;
-                            double sp = o.StopPrice;
-                            if (double.IsNaN(sp) || sp <= 0) continue;
-                            map[o.Time.Date] = sp;   // 1 stop order/day for the event strategies
-                        }
-                        catch { }
-                    }
-                }
-                finally { try { orders.Dispose(); } catch { } }
-            }
-            catch { }
-            return map;
+            public DateTime Placed;     // its first update with history, else Order.Time
+            public DateTime Ended;      // Order.Time with history: its cancel or fill. Unknown without (HasEnd false)
+            public bool HasEnd;         // NinjaTrader kept its history
+            public int Seq;             // equal times keep the order history's own order
+            public bool ExitSide;       // Sell / BuyToCover: a protective stop. Buy / SellShort: a stop-market ENTRY
+            public bool ForLong;        // Sell protects a long, BuyToCover a short
+            public string FromEntry;    // Order.FromEntrySignal ("" when unknown)
+            public string Oco;          // Order.Oco ("" when none)
+            public double StopPrice;
         }
 
-        // Resolve a trade's absolute stop level: prefer the per-day StopMarket map (covers
-        // time-exit days); fall back to the exit order's StopPrice when the exit itself was
-        // the stop; else NaN (the field is then omitted -> the comparator sees it absent).
-        private static double ResolveStop(Trade t, Dictionary<DateTime, double> stopByDate)
+        // The run's stop orders, indexed for MatchStop: those with history by Ended, those without by
+        // Placed, and every one by its OCO id. Pure, so the test builds it the same way.
+        internal sealed class StopIndex
         {
+            public List<StopCandidate> ByEnd = new List<StopCandidate>();
+            public List<StopCandidate> ByPlaced = new List<StopCandidate>();
+            public Dictionary<string, List<StopCandidate>> ByOco = new Dictionary<string, List<StopCandidate>>();
+            public int Count;
+            public int WithHistory;
+
+            public static StopIndex Build(List<StopCandidate> all)
+            {
+                StopIndex x = new StopIndex();
+                foreach (StopCandidate c in all)
+                {
+                    x.Count++;
+                    if (c.HasEnd) { x.WithHistory++; x.ByEnd.Add(c); } else x.ByPlaced.Add(c);
+                    if (!string.IsNullOrEmpty(c.Oco))
+                    {
+                        List<StopCandidate> l;
+                        if (!x.ByOco.TryGetValue(c.Oco, out l)) { l = new List<StopCandidate>(); x.ByOco[c.Oco] = l; }
+                        l.Add(c);
+                    }
+                }
+                x.ByEnd.Sort(delegate(StopCandidate a, StopCandidate b) {
+                    int k = a.Ended.CompareTo(b.Ended);
+                    return k != 0 ? k : a.Seq.CompareTo(b.Seq);
+                });
+                x.ByPlaced.Sort(delegate(StopCandidate a, StopCandidate b) {
+                    int k = a.Placed.CompareTo(b.Placed);
+                    return k != 0 ? k : a.Seq.CompareTo(b.Seq);
+                });
+                return x;
+            }
+        }
+
+        // Every protective-stop candidate of the run (StopMarket / StopLimit; never the "Close position"
+        // order of a reversal). Defensive: an API hiccup degrades to fewer candidates (or none), never to
+        // a failed result.
+        private static StopIndex BuildStopIndex(SystemPerformance perf)
+        {
+            var list = new List<StopCandidate>();
             try
             {
-                if (t.Entry != null && stopByDate != null)
+                IEnumerator<Order> orders = perf.GetBacktestOrdersReverse();   // newest first
+                if (orders != null)
                 {
-                    double s;
-                    if (stopByDate.TryGetValue(t.Entry.Time.Date, out s))
-                        return s;
-                }
-                if (t.Exit != null && t.Exit.Order != null
-                    && t.Exit.Order.OrderType == OrderType.StopMarket)
-                {
-                    double sp = t.Exit.Order.StopPrice;
-                    if (!double.IsNaN(sp) && sp > 0)
-                        return sp;
+                    try
+                    {
+                        int n = 0;
+                        while (orders.MoveNext())
+                        {
+                            Order o = orders.Current;
+                            n++;
+                            try
+                            {
+                                if (o == null || (o.OrderType != OrderType.StopMarket && o.OrderType != OrderType.StopLimit)) continue;
+                                if (o.Name == "Close position") continue;
+                                double sp = o.StopPrice;
+                                if (double.IsNaN(sp) || sp <= 0) continue;
+                                StopCandidate c = new StopCandidate();
+                                DateTime first = DateTime.MinValue;
+                                try
+                                {
+                                    IList<OrderEventArgs> ups = o.OrderUpdates;
+                                    if (ups != null)
+                                        foreach (OrderEventArgs u in ups)
+                                            if (u != null && u.Time != DateTime.MinValue && (first == DateTime.MinValue || u.Time < first))
+                                                first = u.Time;
+                                }
+                                catch { }
+                                c.HasEnd = first != DateTime.MinValue;
+                                c.Placed = c.HasEnd ? first : o.Time;
+                                c.Ended = c.HasEnd ? o.Time : DateTime.MinValue;
+                                c.Seq = -n;
+                                c.ExitSide = o.OrderAction == OrderAction.Sell || o.OrderAction == OrderAction.BuyToCover;
+                                c.ForLong = o.OrderAction == OrderAction.Sell;
+                                c.FromEntry = o.FromEntrySignal ?? "";
+                                c.Oco = o.Oco ?? "";
+                                c.StopPrice = sp;
+                                list.Add(c);
+                            }
+                            catch { }
+                        }
+                    }
+                    finally { try { orders.Dispose(); } catch { } }
                 }
             }
             catch { }
-            return double.NaN;
+            return StopIndex.Build(list);
+        }
+
+        // A trade's stop level (the rules are MatchStop's); NaN when none is found, and the field is
+        // then omitted - the comparator sees it absent rather than wrong.
+        private static double ResolveStop(Trade t, StopIndex stops)
+        {
+            try
+            {
+                if (t.Entry == null || t.Exit == null) return double.NaN;
+                bool isLong = t.Entry.MarketPosition == MarketPosition.Long;
+                string signal = "";
+                try { if (t.Entry.Order != null && t.Entry.Order.Name != null) signal = t.Entry.Order.Name; } catch { }
+                bool exitWasStop = false;
+                double exitStop = double.NaN;
+                string exitOco = "";
+                try
+                {
+                    Order xo = t.Exit.Order;
+                    if (xo != null)
+                    {
+                        // A reversal's "Close position" stop is the NEW entry's trigger, not this trade's stop.
+                        exitWasStop = (xo.OrderType == OrderType.StopMarket || xo.OrderType == OrderType.StopLimit)
+                                      && (xo.OrderAction == OrderAction.Sell || xo.OrderAction == OrderAction.BuyToCover)
+                                      && xo.Name != "Close position";
+                        exitStop = xo.StopPrice;
+                        exitOco = xo.Oco ?? "";
+                    }
+                }
+                catch { }
+                return MatchStop(stops, t.Entry.Time, t.Exit.Time, isLong, signal, exitWasStop, exitStop, exitOco);
+            }
+            catch { return double.NaN; }
+        }
+
+        // The stop of one trade, from plain data (C# 5: the test compiles it with the .NET Framework csc).
+        // 1. It exited ON its stop: that order's price - the level that filled.
+        // 2. A target exit: its OCO partner, found by the OCO id (one per bracket), whatever the times say.
+        // 3. With history: the stop that was alive when it closed - the exit side of its direction (a
+        //    stop-market ENTRY never counts), from its entry signal when both name one, placed no later
+        //    than its exit (AT it only when the trade lasted no longer: a trade entered on the exit bar
+        //    places its own then), and ended - cancelled or filled - AT or AFTER its exit; the one that
+        //    ended FIRST (a trade's own stop goes when it closes; another trade's later). Equal ends
+        //    (scaled in under one signal): placed nearest the entry. Nothing alive at the exit: its own
+        //    stop cancelled shortly before (CancelOrder, then an exit on the next bar) - the last placed
+        //    during the trade.
+        // 4. Without history (a backtest): a stop placed during the trade - from its entry, before its
+        //    exit (AT it only for a trade that lasted no longer) - preferring one placed AT its entry
+        //    (each entry's stop goes in with its fill, so two entries scaled in under one signal keep
+        //    their own), else the latest. Without history a stop cancelled and placed again cannot be
+        //    told from a second one: the one placed at the entry wins.
+        // NaN when nothing matches. Scans are bounded, so a huge order history cannot stall the result.
+        internal static double MatchStop(StopIndex ix, DateTime entryTime, DateTime exitTime, bool isLong,
+                                         string entrySignal, bool exitWasStop, double exitStopPrice, string exitOco)
+        {
+            if (exitWasStop && !double.IsNaN(exitStopPrice) && exitStopPrice > 0) return exitStopPrice;
+            if (ix == null) return double.NaN;
+            const int scanLimit = 5000;
+            if (!string.IsNullOrEmpty(exitOco))
+            {
+                List<StopCandidate> partners;
+                if (ix.ByOco.TryGetValue(exitOco, out partners))
+                    foreach (StopCandidate c in partners)
+                        if (StopFits(c, entryTime, exitTime, isLong, entrySignal)) return c.StopPrice;
+            }
+
+            List<StopCandidate> byEnd = ix.ByEnd;
+            int lo = 0, hi = byEnd.Count;
+            while (lo < hi) { int mid = (lo + hi) / 2; if (byEnd[mid].Ended < exitTime) lo = mid + 1; else hi = mid; }
+            int best = -1;
+            for (int i = lo; i < byEnd.Count && i < lo + scanLimit; i++)
+            {
+                StopCandidate c = byEnd[i];
+                if (best >= 0 && c.Ended > byEnd[best].Ended) break;
+                if (!StopFits(c, entryTime, exitTime, isLong, entrySignal)) continue;
+                if (best < 0) { best = i; continue; }
+                if (Math.Abs((c.Placed - entryTime).Ticks) < Math.Abs((byEnd[best].Placed - entryTime).Ticks)) best = i;
+            }
+            if (best >= 0) return byEnd[best].StopPrice;
+            for (int i = lo - 1; i >= 0 && i >= lo - scanLimit && byEnd[i].Ended >= entryTime; i--)
+                if (byEnd[i].Placed >= entryTime && StopFits(byEnd[i], entryTime, exitTime, isLong, entrySignal))
+                    return byEnd[i].StopPrice;
+
+            List<StopCandidate> byPlaced = ix.ByPlaced;
+            lo = 0; hi = byPlaced.Count;
+            while (lo < hi) { int mid = (lo + hi) / 2; if (byPlaced[mid].Placed < entryTime) lo = mid + 1; else hi = mid; }
+            int atEntry = -1, latest = -1;
+            for (int i = lo; i < byPlaced.Count && i < lo + scanLimit && byPlaced[i].Placed <= exitTime; i++)
+            {
+                if (!StopFits(byPlaced[i], entryTime, exitTime, isLong, entrySignal)) continue;
+                if (byPlaced[i].Placed == entryTime) atEntry = i;
+                latest = i;
+            }
+            int pick = atEntry >= 0 ? atEntry : latest;
+            return pick >= 0 ? byPlaced[pick].StopPrice : double.NaN;
+        }
+
+        private static bool StopFits(StopCandidate c, DateTime entryTime, DateTime exitTime, bool isLong, string entrySignal)
+        {
+            if (!c.ExitSide || c.ForLong != isLong) return false;
+            if (!string.IsNullOrEmpty(c.FromEntry) && !string.IsNullOrEmpty(entrySignal) && c.FromEntry != entrySignal) return false;
+            if (c.Placed > exitTime) return false;                              // a later trade's stop
+            if (c.Placed == exitTime && entryTime < exitTime) return false;    // placed by a trade entered on the exit bar
+            return true;
         }
 
         private static string Num(double d)
