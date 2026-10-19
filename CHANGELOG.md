@@ -6,6 +6,33 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.4] - 2026-10-19
+
+### Fixed
+
+- **`backtest`: each trade's `stopPrice` is now its own stop.** The stop levels were looked up by
+  calendar day, which only worked for strategies that trade once a day. On a day with more trades:
+  - every trade got that day's first stop;
+  - a stop-market *entry* counted as a stop;
+  - the day's stop even replaced the stop a trade actually exited on.
+
+  Each trade is now matched to its own stop order:
+  - **Stop exit:** the price of the stop that filled.
+  - **Target exit:** the target's OCO partner.
+  - **Any other exit:** the protective stop of its side and entry signal.
+
+  The rules take into account how NinjaTrader timestamps orders. A Strategy Analyzer order keeps no
+  change history, and its time stays when it was placed. A live order's time is its last change.
+
+  Checked on a real backtest (YM, 226 trades, 45 days with two or more):
+  - 222 trades report a stop exactly 40 points from their own entry: all 146 stop exits and all 73
+    target exits, where none of the target exits was right before;
+  - 4 of 6 session-close exits report no stop rather than a wrong one.
+
+  The result also gains `"stopOrders": {"count", "withHistory"}`. The add-on (`NT8BridgeServer.cs`)
+  has to be recompiled in NinjaTrader for the fix; `tools\Test-BacktestStops.ps1` covers it.
+- **NT8 Guard 0.9.4** ships this NT8 link in `NT8Guard-AddOns.zip`. Nothing else in Guard changed.
+
 ## [1.7.3] - 2026-10-18
 
 ### Added
