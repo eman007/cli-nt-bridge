@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.5] - 2026-10-19
+
+### Added
+
+- **NT8 Guard 0.9.5: the version in the control panel.** The header now reads `NT8 GUARD  Ver 0.9.5`,
+  taken from `app\VERSION`, so you can see which Guard a PC runs without opening its folder. The window
+  title stays `NT8 Guard`. The guide's screenshots are refreshed. Nothing else changed.
+
 ## [1.7.4] - 2026-10-19
 
 ### Fixed
