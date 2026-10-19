@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-10-18
+
+### Added
+
+- **NT8 Guard 0.9.3: Stop Guard / Start Guard.** A pause always ends by itself (24 hours at most), so
+  turning Guard off for longer meant Task Scheduler or Uninstall. The Tools tab now has **Stop Guard**
+  next to Pause.
+  - **Stop** switches Guard's three scheduled tasks off until someone presses **Start Guard**. It also
+    tells the feed guard add-on inside NinjaTrader to only watch: no reconnect, no recovery, no
+    strategy switched back on, no push. Your phone gets one alert, and Status shows **STOPPED** with a
+    Start Guard button.
+  - Settings, the saved password, the strategy backups and the logs are kept.
+  - A watchdog check that was already running when Stop was pressed stands down at its next step. It
+    checks before any reconnect, flatten, re-enable, start or kill, and Stop waits for it (90 s at most).
+  - **Start** switches the tasks on, gives the feed guard its settings back and runs both watchdogs
+    once. A closed NinjaTrader is then started within a minute, as Protection allows.
+  - While Guard is stopped, Put back now, Bring back, Test login and the fire drill refuse.
+  - A stop that was undone outside the panel (tasks switched on in Task Scheduler) gets a Status
+    banner and a Start Guard button. The setup ends a stop once both watchdog tasks are installed.
+  - Stopping and starting need no administrator rights.
+
 ## [1.7.2] - 2026-10-17
 
 ### Fixed
