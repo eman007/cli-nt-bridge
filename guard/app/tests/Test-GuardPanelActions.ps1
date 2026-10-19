@@ -102,6 +102,38 @@ Click 'OverlayCancel'
 Click 'ToolDrill'
 Check 'the fire drill asks first, saying why you must be flat' ((Ui 'OverlayTitle').Text -eq 'Run the fire drill?' -and (Ui 'OverlayText').Text -match 'switches the strategies on that connection off') (Ui 'OverlayText').Text
 Click 'OverlayCancel'
+
+'--- Stop and Start'
+$script:ptasks = @{ 'NT8Guard-Relaunch' = 'Ready'; 'NT8Guard-Overwatch' = 'Ready'; 'NT8Guard-LogArchive' = 'Ready' }
+$ptState = { param($n) $script:ptasks[$n] }
+$ptSet = { param($n, $on) $script:ptasks[$n] = $(if ($on) { 'Ready' } else { 'Disabled' }) }
+$noSend = { param($u, $hd, $b, $c) }
+$script:ActionSeams.stop = @{ TaskState = $ptState; SetTaskEnabled = $ptSet; Sender = $noSend }
+$script:ActionSeams.start = @{ TaskState = $ptState; SetTaskEnabled = $ptSet; RunTask = { param($n) }; WaitSeconds = 0; Sleep = { param($ms) }; Sender = $noSend }
+$panelStatus = { Update-PanelStatus (Get-GuardStatus -GuardHome $GuardHome -Nt8Dir $Nt8Dir -Processes { , @() } -TaskState $ptState -Nt8Version ([version]'8.1.8.3')) }
+Check 'Tools shows Stop Guard, not Start Guard' ((Ui 'ToolStop').Visibility -eq 'Visible' -and (Ui 'ToolStart').Visibility -eq 'Collapsed') ''
+Click 'ToolStop'
+Check 'Stop asks first, saying it never ends by itself' ((Ui 'Overlay').Visibility -eq 'Visible' -and (Ui 'OverlayTitle').Text -eq 'Stop NT8 Guard?' -and (Ui 'OverlayText').Text -match 'never ends by itself') (Ui 'OverlayText').Text
+Click 'OverlayOk'
+Check 'stopped: the tasks are off, the result says how to start it again' ($script:ptasks['NT8Guard-Overwatch'] -eq 'Disabled' -and (Ui 'ActionResult').Text -match 'Start Guard') (Ui 'ActionResult').Text
+Check 'and so does the message under the buttons' ((Ui 'ToolPauseMsg').Text -match 'stopped') (Ui 'ToolPauseMsg').Text
+(Ui 'ActionOverlay').Visibility = 'Collapsed'
+& $panelStatus
+Check 'Status header: STOPPED, and Start Guard where the pause buttons were' ((Ui 'OverallText').Text -match '^STOPPED since' -and (Ui 'StopActive').Visibility -eq 'Visible' -and (Ui 'PauseIdle').Visibility -eq 'Collapsed' -and (Ui 'StopText').Text -match '^Guard has been stopped since') "$((Ui 'OverallText').Text) / $((Ui 'StopText').Text)"
+Check 'Tools: Start Guard instead of Stop Guard, and no pausing a stopped Guard' ((Ui 'ToolStart').Visibility -eq 'Visible' -and (Ui 'ToolStop').Visibility -eq 'Collapsed' -and -not (Ui 'ToolPause30').IsEnabled) ''
+Click 'StartGuard'
+Check 'Start asks first, saying a closed NinjaTrader gets started' ((Ui 'OverlayTitle').Text -eq 'Start NT8 Guard?' -and (Ui 'OverlayText').Text -match 'If NinjaTrader is closed') (Ui 'OverlayText').Text
+Click 'OverlayOk'
+Check 'started: the tasks are on, watching again' ($script:ptasks['NT8Guard-Overwatch'] -eq 'Ready' -and (Ui 'ActionResult').Text -match 'watching again') (Ui 'ActionResult').Text
+(Ui 'ActionOverlay').Visibility = 'Collapsed'
+& $panelStatus
+Check 'back to the pause buttons and Stop Guard' ((Ui 'StopActive').Visibility -eq 'Collapsed' -and (Ui 'PauseIdle').Visibility -eq 'Visible' -and (Ui 'ToolStop').Visibility -eq 'Visible' -and (Ui 'ToolStart').Visibility -eq 'Collapsed' -and (Ui 'ToolPause30').IsEnabled) ''
+# Stopped here, then the tasks switched on in Task Scheduler: Guard runs, Tools offers Start Guard to finish.
+[IO.File]::WriteAllText((Get-GuardStopPath $GuardHome), '{ "stoppedUtc": "2026-10-01T00:00:00Z" }')
+& $panelStatus
+Check 'a stop undone outside the panel: Start Guard offered beside Stop Guard' ((Ui 'ToolStart').Visibility -eq 'Visible' -and (Ui 'ToolStop').Visibility -eq 'Visible' -and (Ui 'StopActive').Visibility -eq 'Collapsed') ''
+Remove-Item (Get-GuardStopPath $GuardHome)
+
 $menu = New-TestDir startmenu
 $script:ActionSeams.uninstall = @{ RemoveTask = { param($n) $true }; StartMenuDir = $menu; PanelPid = 0 }
 Click 'ToolUninstall'

@@ -68,4 +68,29 @@ function Get-GuardPauseState {
     return [pscustomobject]@{ Paused = $false; Source = 'none'; UntilUtc = $null; Reason = '' }
 }
 
-Export-ModuleMember -Function Get-GuardPausePath, Set-GuardPause, Clear-GuardPause, Get-GuardPauseState
+# Stop (Tools > Stop Guard, Invoke-GuardStop) is not a pause: it switches Guard's scheduled tasks off and
+# never ends by itself. state\stopped.json only records that it was done on purpose. The tasks' own state
+# stays the truth (Get-GuardStatus reads both): tasks switched back on by hand or by the setup are a running
+# Guard, whatever the file says. Start and the setup's task install delete it.
+function Get-GuardStopPath { [CmdletBinding()] param([string]$GuardHome) Join-Path (Get-GuardPath state $GuardHome) 'stopped.json' }
+
+# When this process started: a watchdog run is one process (Guard-Run.vbs starts it and does not wait).
+$script:ProcessStartUtc = $(try { (Get-Process -Id $PID).StartTime.ToUniversalTime() } catch { [DateTime]::UtcNow })
+
+function Test-GuardStopHeld {
+    # Must THIS watchdog run stand down? Stop switches the tasks off, but a run that had already started is
+    # still going - an overwatch run can take minutes (a crash dump, a restore) and would otherwise kill or
+    # start NinjaTrader after the stop. It stands down at its next step: the stop is newer than the run. A
+    # run that started after the stop can only come from a task switched on again (by hand, or by the
+    # setup): it ignores a left-over file. An unreadable file holds nothing (toward protection, as pause.json).
+    [CmdletBinding()] param([string]$GuardHome, [Nullable[DateTime]]$ProcessStartUtc)
+    $path = Get-GuardStopPath $GuardHome
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    $since = $null
+    try { $since = ConvertFrom-GuardUtc ([string]([IO.File]::ReadAllText($path) | ConvertFrom-Json).stoppedUtc) } catch { }
+    if (-not $since) { return $false }
+    $start = $(if ($null -ne $ProcessStartUtc) { [DateTime]$ProcessStartUtc } else { $script:ProcessStartUtc })
+    return ($start -lt $since)
+}
+
+Export-ModuleMember -Function Get-GuardPausePath, Set-GuardPause, Clear-GuardPause, Get-GuardPauseState, Get-GuardStopPath, Test-GuardStopHeld

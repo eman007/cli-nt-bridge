@@ -21,6 +21,8 @@ Import-Module (Join-Path $PSScriptRoot 'Guard.Start.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Guard.Status.psm1')     # Get-GuardBackupList, Get-GuardPanelPause, Format-GuardTime
 Import-Module (Join-Path $PSScriptRoot 'Guard.Nt8Link.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Guard.Password.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Guard.Alerts.psm1')       # Send-GuardAlert (Stop, Start)
+Import-Module (Join-Path $PSScriptRoot 'Guard.FeedGuard.psm1')    # Write-FeedGuardConfig (Stop, Start)
 
 # The steps each action reports, in order - the panel lists them before the action starts.
 $script:Steps = @{
@@ -33,6 +35,11 @@ $script:Steps = @{
                             back = 'Market data is back' }
     uninstall = [ordered]@{ tasks = 'Remove the scheduled tasks'; shortcut = 'Remove the Start-menu shortcut'
                             files = 'Remove Guard''s folder (when this window closes)' }
+    stop      = [ordered]@{ tasks = 'Switch Guard''s scheduled tasks off'; wait = 'Let a running overwatch check stand down'
+                            feedguard = 'Feed guard: watch only (no reconnect, no recovery, no alert)'
+                            alert = 'Tell your phone Guard is stopped' }
+    start     = [ordered]@{ tasks = 'Switch Guard''s scheduled tasks on'; feedguard = 'Feed guard: back to your settings'
+                            check = 'Run both watchdogs once'; alert = 'Tell your phone Guard is watching again' }
     # setup's last step (Guard.Setup, Invoke-GuardSetupFinish)
     finish    = [ordered]@{ relaunch = 'Install the relauncher (starts NinjaTrader when it is down)'
                             overwatch = 'Install the overwatch (restarts NinjaTrader when it is sick)'
@@ -92,6 +99,15 @@ function Exit-GuardActionPause {
     try { $now = [IO.File]::ReadAllText($f) | ConvertFrom-Json } catch { }
     if ($now -and [string]$now.setUtc -eq [string]$Pause.setUtc) { Clear-GuardPause -GuardHome $GuardHome }
     & $Report resume ok 'Guard is watching again.'
+}
+
+function Get-GuardStopRefusal {
+    # Put back, Bring back, Test login and the fire drill count on Guard's watchdogs - or the feed guard's
+    # recovery - to finish what they start, so none runs while Guard is stopped, or only half started again
+    # (the stop file outlived a task switched on outside the panel). '' when they may run.
+    param([string]$GuardHome)
+    if (Test-Path -LiteralPath (Get-GuardStopPath $GuardHome)) { return 'Guard is stopped. Press Start Guard (Tools) first, then try again.' }
+    return ''
 }
 
 function Get-GuardRestartNote {
@@ -179,6 +195,8 @@ function Invoke-GuardPutBack {
     if (-not $Flat) { $Flat = { Get-Nt8FlatState -Config $Config -Nt8Dir $nt8 -GuardHome $GuardHome } }
     if (-not $IsRunning) { $IsRunning = { [bool](@(Get-GuardSessionProcess -Name NinjaTrader).Count) } }
     if (-not $Python) { $Python = { param($s, $a, $t) Invoke-GuardPython -Script $s -Arguments $a -TimeoutSeconds $t -Config $Config } }
+    $stopped = Get-GuardStopRefusal $GuardHome
+    if ($stopped) { return (New-GuardActionResult $false refused $stopped) }
 
     # Which ones - decided from the backup list before anything is touched, so a name that is on
     # NinjaTrader's list right now never costs a NinjaTrader restart.
@@ -280,6 +298,8 @@ function Invoke-GuardTestLogin {
                     $p.Refresh(); return $p.MainWindowTitle }
     }
     if (-not $Sleep) { $Sleep = { param($ms) Start-Sleep -Milliseconds $ms } }
+    $stopped = Get-GuardStopRefusal $GuardHome
+    if ($stopped) { return (New-GuardActionResult $false refused $stopped) }
 
     $helper = [string]$Config.login.helper
     $external = $helper -and $helper -ne 'builtin'
@@ -371,6 +391,8 @@ function Invoke-GuardFireDrill {
     $refuse = { param($why) & $report check failed $why; New-GuardActionResult $false refused $why }
 
     & $report check running ''
+    $stopped = Get-GuardStopRefusal $GuardHome
+    if ($stopped) { return (& $refuse $stopped) }
     if (-not (& $IsRunning)) { return (& $refuse 'Start NinjaTrader first: the drill runs inside it.') }
     $hbPath = [IO.Path]::Combine($nt8, 'AutoReconnect.heartbeat.json')
     $hb = $null
@@ -570,6 +592,212 @@ function Invoke-GuardUninstall {
     return [pscustomobject]@{ Ok = $true; Result = 'done'; Message = $msg; CleanupScript = $script }
 }
 
+function Get-GuardTaskStateDefault {
+    param([string]$Name)
+    $t = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+    if ($t) { [string]$t.State } else { $null }
+}
+
+function Write-GuardStopFeedGuard {
+    # The feed guard's settings file for Stop (-Stopped) or Start, reported as the feedguard step. Never throws.
+    param([hashtable]$Config, [string]$Nt8Dir, [bool]$Stopped, [scriptblock]$Report)
+    $null = & $Report feedguard running ''
+    $nt8 = $(if ($Nt8Dir) { $Nt8Dir } else { Get-Nt8DataDir ([string]$Config.nt8.dataDir) })
+    if (-not (Test-Path -LiteralPath $nt8)) { $null = & $Report feedguard skipped "NinjaTrader's folder was not found ($nt8)."; return '' }
+    try {
+        $r = Write-FeedGuardConfig -Config $Config -Nt8Dir $nt8 -Stopped:$Stopped
+        $when = $(if ($r.Changed) { 'It picks this up within seconds, or at NinjaTrader''s next start.' } else { 'It already had these settings.' })
+        $null = & $Report feedguard ok $when
+        return ''
+    } catch {
+        $why = "Its settings file could not be written: $($_.Exception.Message)"
+        $null = & $Report feedguard failed $why
+        return $why
+    }
+}
+
+function Send-GuardStopAlert {
+    # One alert for Stop or Start, reported as the alert step. Never throws.
+    param([hashtable]$Config, [string]$GuardHome, [string]$Title, [string]$Body, [string]$Severity, [scriptblock]$Sender, [scriptblock]$Report)
+    $null = & $Report alert running ''
+    if (-not $Config.alerts.ntfyTopic -and -not $Config.alerts.webhookUrl) { $null = & $Report alert skipped 'No alert channel is set up.'; return }
+    $a = Send-GuardAlert -Title $Title -Body $Body -Severity $Severity -Config $Config -Component panel -GuardHome $GuardHome -Sender $Sender
+    $bad = @(@([string]$a.ntfy, [string]$a.webhook) | Where-Object { $_ -like 'failed*' })
+    if ($bad.Count) { $null = & $Report alert failed ($bad -join '; ') } else { $null = & $Report alert ok 'Sent.' }
+}
+
+function Invoke-GuardStop {
+    # Stop (Tools > Stop Guard): Guard does nothing until Start. Its three scheduled tasks are switched off -
+    # so nothing restarts NinjaTrader, puts a strategy back or pages your phone - and the feed guard inside
+    # NinjaTrader is told to only watch: no reconnect, no recovery, no strategy switched back on, no push.
+    # Unlike a pause it never ends by itself, so it pages your phone once, and Status shows STOPPED.
+    # Settings, the saved password, the backups and the logs are kept; NinjaTrader is not touched.
+    # state\stopped.json is written FIRST, under the start lock: the launcher does not wait for a watchdog
+    # run, so switching a task off leaves a run that already started going (an overwatch run can take
+    # minutes) - it reads the file and stands down at its next step (Test-GuardStopHeld), so it can neither
+    # kill nor start NinjaTrader after the stop. A task that will not switch off switches back on the ones
+    # Stop switched off (never one you had switched off yourself) and removes the file: never half stopped.
+    # Seams: -TaskState { param($name) -> 'Ready' | 'Running' | 'Disabled' | $null }, -SetTaskEnabled
+    # { param($name, [bool]$On) }, -Sender (Send-GuardAlert's), -OverwatchWaitSeconds, -Sleep { param($ms) }, -Progress.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$Config, [string]$GuardHome, [string]$Nt8Dir, [string]$TaskPrefix = 'NT8Guard',
+          [scriptblock]$TaskState, [scriptblock]$SetTaskEnabled, [scriptblock]$Sender, [int]$OverwatchWaitSeconds = 90,
+          [scriptblock]$Sleep, [scriptblock]$Progress)
+    $report = { param($k, $s, $t) if ($Progress) { & $Progress $k $s $t } }
+    if (-not $TaskState) { $TaskState = { param($n) Get-GuardTaskStateDefault $n } }
+    if (-not $SetTaskEnabled) {
+        $SetTaskEnabled = { param($n, $on) if ($on) { Enable-ScheduledTask -TaskName $n -ErrorAction Stop | Out-Null } else { Disable-ScheduledTask -TaskName $n -ErrorAction Stop | Out-Null } }
+    }
+    if (-not $Sleep) { $Sleep = { param($ms) Start-Sleep -Milliseconds $ms } }
+    $names = @('Relaunch', 'Overwatch', 'LogArchive' | ForEach-Object { "$TaskPrefix-$_" })
+    $short = { param($n) $n -replace "^$([regex]::Escape($TaskPrefix))-", '' }
+    $path = Get-GuardStopPath $GuardHome
+    $stamp = {
+        [IO.File]::WriteAllText("$path.tmp", (([ordered]@{ stoppedUtc = [DateTime]::UtcNow.ToString('o'); reason = 'from the control panel' }) | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath "$path.tmp" -Destination $path -Force
+    }
+
+    $lock = Open-GuardStartLock $GuardHome
+    if (-not $lock) { return (New-GuardActionResult $false refused 'Guard is busy right now (starting NinjaTrader, or saving the strategy backups). Try again in a minute.') }
+    try {
+        & $report tasks running ''
+        $present = @($names | Where-Object { $null -ne (& $TaskState $_) })
+        if (-not $present.Count) {
+            $why = 'Guard''s tasks are not installed, so nothing of Guard is running. Run the setup (Tools > Run setup) to install them.'
+            & $report tasks failed $why
+            return (New-GuardActionResult $false refused $why)
+        }
+        try { & $stamp } catch {
+            $why = "Nothing was switched off: Guard could not write $path ($($_.Exception.Message))."
+            & $report tasks failed $why
+            return (New-GuardActionResult $false failed $why)
+        }
+        $off = New-Object System.Collections.Generic.List[string]; $stuck = New-Object System.Collections.Generic.List[string]
+        foreach ($n in $present) {
+            if ((& $TaskState $n) -eq 'Disabled') { continue }      # already off: not Stop's to switch back on
+            try { & $SetTaskEnabled $n $false } catch { }
+            # The scheduler cmdlets can fail without throwing: ask the scheduler.
+            if ((& $TaskState $n) -eq 'Disabled') { $off.Add($n) } else { $stuck.Add($n) }
+        }
+        if ($stuck.Count) {
+            foreach ($n in $off) { try { & $SetTaskEnabled $n $true } catch { } }
+            try { Remove-Item -LiteralPath $path -Force } catch { }
+            $why = "Could not switch off $(@($stuck | ForEach-Object { & $short $_ }) -join ', '), so Guard was left running as it was. Switch the NT8Guard tasks off in Task Scheduler (Task Scheduler Library) instead."
+            & $report tasks failed $why
+            return (New-GuardActionResult $false failed $why)
+        }
+        # Stamped again with the tasks off: every run that began before this moment stands down. (If both tries
+        # fail the first stamp stands; only a run begun in the instant before the switch-off escapes it.)
+        try { & $stamp } catch { try { & $stamp } catch { } }
+        Write-GuardLog -Component panel -Message "Guard stopped: $($present -join ', ') off ($($off.Count) switched off now)" -GuardHome $GuardHome
+        Write-GuardEvent -Component panel -Kind 'guard.stopped' -Severity warn -Text 'Guard stopped from the control panel' -GuardHome $GuardHome
+        $missing = @($names | Where-Object { $present -notcontains $_ })
+        & $report tasks ok ("$(@($present | ForEach-Object { & $short $_ }) -join ', ') off." +
+                            $(if ($missing.Count) { " $(@($missing | ForEach-Object { & $short $_ }) -join ', ') was not installed." } else { '' }))
+    } finally { $lock.Dispose() }
+
+    # An overwatch run still going holds its run lock. It checks the stop before every step that acts
+    # (reconnect, flatten, re-enable, kill), so it ends soon: wait for it, bounded, and say if it has not.
+    & $report wait running ''
+    $owLock = Join-Path (Get-GuardPath state $GuardHome) 'overwatch.lock'
+    $deadline = [DateTime]::UtcNow.AddSeconds($OverwatchWaitSeconds)
+    $busy = $true
+    do {
+        try { ([IO.File]::Open($owLock, 'OpenOrCreate', 'ReadWrite', 'None')).Dispose(); $busy = $false } catch { }
+        if (-not $busy -or [DateTime]::UtcNow -ge $deadline) { break }
+        & $Sleep 500
+    } while ($true)
+    if ($busy) { & $report wait failed 'Still running (a crash report can take minutes): it stands down at its next step and does not restart NinjaTrader.' }
+    else { & $report wait ok 'No overwatch check is running.' }
+    $fgWhy = Write-GuardStopFeedGuard -Config $Config -Nt8Dir $Nt8Dir -Stopped $true -Report $report
+    Send-GuardStopAlert -Config $Config -GuardHome $GuardHome -Title 'NT8 Guard stopped' -Severity warn -Sender $Sender -Report $report `
+        -Body 'Stopped from the control panel. Nothing watches NinjaTrader on this PC - no restart, no reconnect, no alert - until Guard is started again (Tools > Start Guard).'
+    $msg = 'NT8 Guard is stopped until you press Start Guard: nothing restarts NinjaTrader, reconnects it, puts a strategy back or alerts you. ' +
+           'Settings, the saved password, the backups and the logs are kept.'
+    if ($busy) { $msg += ' An overwatch check is still running (a crash report can take minutes): it stands down at its next step and does not restart NinjaTrader.' }
+    if ($fgWhy) { $msg += " The feed guard inside NinjaTrader was NOT told to stand still and may still reconnect: $fgWhy" }
+    return (New-GuardActionResult $true done $msg)
+}
+
+function Invoke-GuardStart {
+    # Start (Tools > Start Guard, or Status): the three tasks on again, the feed guard's settings from
+    # guard.json again, then both watchdogs run once now - so if NinjaTrader is closed, the relauncher
+    # starts it within the minute (as Protection allows). Also works on tasks switched off by hand.
+    # Seams: as Invoke-GuardStop, plus -RunTask { param($name) }, -WaitSeconds, -Sleep { param($ms) }.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$Config, [string]$GuardHome, [string]$Nt8Dir, [string]$TaskPrefix = 'NT8Guard',
+          [scriptblock]$TaskState, [scriptblock]$SetTaskEnabled, [scriptblock]$RunTask, [int]$WaitSeconds = 60,
+          [scriptblock]$Sleep, [scriptblock]$Sender, [scriptblock]$Progress)
+    $report = { param($k, $s, $t) if ($Progress) { & $Progress $k $s $t } }
+    if (-not $TaskState) { $TaskState = { param($n) Get-GuardTaskStateDefault $n } }
+    if (-not $SetTaskEnabled) {
+        $SetTaskEnabled = { param($n, $on) if ($on) { Enable-ScheduledTask -TaskName $n -ErrorAction Stop | Out-Null } else { Disable-ScheduledTask -TaskName $n -ErrorAction Stop | Out-Null } }
+    }
+    if (-not $RunTask) { $RunTask = { param($n) Start-ScheduledTask -TaskName $n -ErrorAction Stop } }
+    if (-not $Sleep) { $Sleep = { param($ms) Start-Sleep -Milliseconds $ms } }
+    $names = @('Relaunch', 'Overwatch', 'LogArchive' | ForEach-Object { "$TaskPrefix-$_" })
+    $short = { param($n) $n -replace "^$([regex]::Escape($TaskPrefix))-", '' }
+
+    & $report tasks running ''
+    $present = @($names | Where-Object { $null -ne (& $TaskState $_) })
+    if (-not $present.Count) {
+        $why = 'Guard''s tasks are not installed. Run the setup (Tools > Run setup) to install them.'
+        & $report tasks failed $why
+        return (New-GuardActionResult $false failed $why)
+    }
+    $stuck = New-Object System.Collections.Generic.List[string]
+    foreach ($n in $present) {
+        if ((& $TaskState $n) -eq 'Disabled') { try { & $SetTaskEnabled $n $true } catch { } }
+        if ((& $TaskState $n) -eq 'Disabled') { $stuck.Add($n) }
+    }
+    if ($stuck.Count) {
+        $why = "Could not switch on $($stuck -join ', '). Switch it on in Task Scheduler (Task Scheduler Library), or run the setup again."
+        & $report tasks failed $why
+        return (New-GuardActionResult $false failed $why)
+    }
+    Write-GuardLog -Component panel -Message "Guard started: $($present -join ', ') switched on" -GuardHome $GuardHome
+    Write-GuardEvent -Component panel -Kind 'guard.started' -Severity info -Text 'Guard started again from the control panel' -GuardHome $GuardHome
+    $missing = @($names | Where-Object { $present -notcontains $_ })
+    $missNote = $(if ($missing.Count) { " $(@($missing | ForEach-Object { & $short $_ }) -join ', ') is not installed - run the setup to install it." } else { '' })
+    & $report tasks ok ("$(@($present | ForEach-Object { & $short $_ }) -join ', ') on." + $missNote)
+
+    # The stop ends once the feed guard has your settings back: if they could not be written, the file
+    # stays and Status keeps saying so (a banner, and Start Guard in Tools to try again).
+    $fgWhy = Write-GuardStopFeedGuard -Config $Config -Nt8Dir $Nt8Dir -Stopped $false -Report $report
+    $path = Get-GuardStopPath $GuardHome
+    if (-not $fgWhy -and (Test-Path -LiteralPath $path)) { Remove-Item -LiteralPath $path -Force }
+
+    # Both watchdogs once now, then wait for their heartbeats: proof they run, not just that they are on.
+    & $report check running ''
+    $state = Get-GuardPath state $GuardHome
+    $watch = @(@{ k = 'relaunch'; t = "$TaskPrefix-Relaunch" }, @{ k = 'overwatch'; t = "$TaskPrefix-Overwatch" } | Where-Object { $present -contains $_.t })
+    $checkNote = ''
+    if (-not $watch.Count) {
+        $checkNote = 'Neither watchdog is installed - run the setup to install them.'
+        & $report check skipped $checkNote
+    } else {
+        $since = [DateTime]::UtcNow.AddSeconds(-1)
+        foreach ($w in $watch) { try { & $RunTask $w.t } catch { } }
+        $deadline = [DateTime]::UtcNow.AddSeconds($WaitSeconds)
+        do {
+            $quiet = @($watch | Where-Object { $hb = Join-Path $state "$($_.k).heartbeat"; -not ((Test-Path -LiteralPath $hb) -and [IO.File]::GetLastWriteTimeUtc($hb) -ge $since) })
+            if (-not $quiet.Count -or [DateTime]::UtcNow -ge $deadline) { break }
+            & $Sleep 1000
+        } while ($true)
+        if ($quiet.Count) {
+            $checkNote = "No report yet from the $(@($quiet | ForEach-Object { $_.k -replace 'relaunch', 'relauncher' }) -join ' and ') - the Status tab shows when it reports."
+            & $report check failed $checkNote
+        } else { & $report check ok $(if ($watch.Count -eq 2) { 'Both reported.' } else { 'It reported.' }) }
+    }
+
+    Send-GuardStopAlert -Config $Config -GuardHome $GuardHome -Title 'NT8 Guard started' -Severity info -Sender $Sender -Report $report `
+        -Body 'Started again from the control panel: Guard is watching NinjaTrader on this PC.'
+    $msg = "NT8 Guard is watching again. If NinjaTrader is closed: $(Get-GuardRestartNote -Config $Config -GuardHome $GuardHome -Nt8Dir $Nt8Dir)" + $missNote
+    if ($checkNote) { $msg += " $checkNote" }
+    if ($fgWhy) { $msg += " The feed guard inside NinjaTrader still only watches - its settings could not be written: $fgWhy Press Start Guard again to retry." }
+    return (New-GuardActionResult $true done $msg)
+}
+
 function Start-GuardCleanup {
     # Run Uninstall's cleanup script hidden and detached: it waits for the panel to exit, then removes Guard's folder.
     [CmdletBinding()] param([Parameter(Mandatory)][string]$Script)
@@ -577,4 +805,4 @@ function Start-GuardCleanup {
 }
 
 Export-ModuleMember -Function Get-GuardActionSteps, Stop-Nt8Hard, Invoke-GuardPutBack, Invoke-GuardTestLogin, Invoke-GuardFireDrill,
-                              Test-GuardRemovable, Invoke-GuardUninstall, Start-GuardCleanup
+                              Test-GuardRemovable, Invoke-GuardUninstall, Invoke-GuardStop, Invoke-GuardStart, Start-GuardCleanup

@@ -151,7 +151,7 @@ figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-si
 <header class="masthead">
   <div class="masthead-inner">
     <div>
-      <div class="brand"><span class="label">NT8 Guard</span><span class="pill">BETA · v0.9.2</span></div>
+      <div class="brand"><span class="label">NT8 Guard</span><span class="pill">BETA · v0.9.3</span></div>
       <h1>NT8 Guard<br>Setup Guide</h1>
       <p class="lede">Keeps NinjaTrader 8 running on its own: starts it again and logs in when it closes or crashes, restarts it when it freezes, brings a dead market-data feed back, puts back strategies NinjaTrader dropped - and tells your phone what it did.</p>
     </div>
@@ -176,7 +176,7 @@ figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-si
       <li class="sep label">Using it</li>
       <li><a href="#panel"><span>—</span>The control panel</a></li>
       <li><a href="#when"><span>—</span>What happens when…</a></li>
-      <li><a href="#pause"><span>—</span>Pausing</a></li>
+      <li><a href="#pause"><span>—</span>Pausing or stopping</a></li>
       <li><a href="#update"><span>—</span>Updating</a></li>
       <li><a href="#uninstall"><span>—</span>Uninstalling</a></li>
       <li class="sep label">Reference</li>
@@ -243,11 +243,11 @@ figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-si
     <section id="install">
       <div class="sec-head"><span class="label">Step 1</span><h2>Install</h2></div>
       <ol class="steps">
-        <li><div><p>Download <code>NT8Guard-v0.9.2.zip</code>, right-click it and choose <strong>Extract All…</strong>. Running <code>Install.cmd</code> from inside the zip does not work (it says so).</p></div></li>
+        <li><div><p>Download <code>NT8Guard-v0.9.3.zip</code>, right-click it and choose <strong>Extract All…</strong>. Running <code>Install.cmd</code> from inside the zip does not work (it says so).</p></div></li>
         <li><div><p>Double-click <strong>Install.cmd</strong> in the extracted folder. Windows may ask whether to run it, because it came from the internet: choose <strong>Run</strong> (or <strong>More info → Run anyway</strong>).</p></div></li>
         <li><div><p>It copies Guard into <code>%LOCALAPPDATA%\NT8Guard</code>, adds <strong>NT8 Guard</strong> to the Start menu, and opens the setup wizard. Nothing runs in the background yet: that starts at the wizard's last step.</p></div></li>
       </ol>
-      <div class="code"><pre>  NT8 Guard 0.9.2
+      <div class="code"><pre>  NT8 Guard 0.9.3
   app\ installed
   python\ installed
   the NinjaTrader add-ons zip and the guide copied
@@ -366,7 +366,7 @@ figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-si
       <figure class="shot"><img src="shots/Watch.png" alt="Watch list tab"><figcaption>Watch list.</figcaption></figure>
 
       <h3>Tools</h3>
-      <p>Test alert, pause, <strong>Test login</strong>, the <strong>fire drill</strong>, a <strong>diagnostics zip</strong> for a bug report (alert address, Windows user name and PC name masked; no password or strategy settings), Guard's and NinjaTrader's folders, the setup pages, and <strong>Uninstall</strong>.</p>
+      <p>Test alert, pause or <strong>stop</strong>, <strong>Test login</strong>, the <strong>fire drill</strong>, a <strong>diagnostics zip</strong> for a bug report (alert address, Windows user name and PC name masked; no password or strategy settings), Guard's and NinjaTrader's folders, the setup pages, and <strong>Uninstall</strong>.</p>
       <figure class="shot"><img src="shots/Tools.png" alt="Tools tab"><figcaption>Tools.</figcaption></figure>
     </section>
 
@@ -394,8 +394,9 @@ figure.shot figcaption { margin-top: 8px; font-family: var(--font-mono); font-si
 
     <!-- PAUSE -->
     <section id="pause">
-      <div class="sec-head"><span class="label">Using it</span><h2>Pausing</h2></div>
+      <div class="sec-head"><span class="label">Using it</span><h2>Pausing or stopping</h2></div>
       <p>Closing NinjaTrader on purpose - maintenance, an update, a reboot of your own? <strong>Pause first</strong> (Status or Tools: 30 min, 2 h or 8 h), or the relauncher starts it again within a minute. A pause always ends by itself (24 hours at most), and <strong>Resume</strong> ends it early.</p>
+      <p>Want Guard off until you say so? <strong>Tools → Stop Guard</strong>. Unlike a pause it never ends by itself: until you press <strong>Start Guard</strong> (on the Status tab or in Tools) nothing restarts NinjaTrader, reconnects it, puts a strategy back or alerts you. Your phone gets one alert, Status shows <strong>STOPPED</strong>, and your settings, saved password, backups and logs are kept. Start Guard runs both watchdogs at once, so a closed NinjaTrader is started within a minute - pause right after if it should stay closed. While Guard is stopped, Put back now, Test login and the fire drill wait for it to be started.</p>
     </section>
 
     <!-- UPDATE -->

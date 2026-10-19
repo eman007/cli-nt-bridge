@@ -160,6 +160,10 @@
               <TextBlock x:Name="PauseText" Text="Paused" VerticalAlignment="Center" Foreground="{StaticResource Warn}" Margin="0,0,12,0"/>
               <Button x:Name="Resume" Content="Resume now" Style="{StaticResource BtnPrimary}" Margin="0"/>
             </StackPanel>
+            <StackPanel x:Name="StopActive" DockPanel.Dock="Right" Orientation="Horizontal" Visibility="Collapsed">
+              <TextBlock x:Name="StopText" Text="Guard is stopped" VerticalAlignment="Center" Foreground="{StaticResource Danger}" Margin="0,0,12,0"/>
+              <Button x:Name="StartGuard" Content="Start Guard" Style="{StaticResource BtnPrimary}" Margin="0" ToolTip="Switches Guard's tasks on again."/>
+            </StackPanel>
             <TextBlock x:Name="Updated" Text="" FontFamily="{StaticResource Mono}" FontSize="12" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
           </DockPanel>
 
@@ -502,14 +506,16 @@
               </Border>
               <Border Style="{StaticResource Card}" Margin="6">
                 <StackPanel>
-                  <TextBlock Text="PAUSE" Style="{StaticResource H2}" Margin="0,0,0,6"/>
-                  <TextBlock Style="{StaticResource Help}" Text="Stops both watchdogs from acting - for maintenance, an update, or closing NinjaTrader on purpose. It always ends by itself (24 hours at most)."/>
-                  <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                  <TextBlock Text="PAUSE OR STOP" Style="{StaticResource H2}" Margin="0,0,0,6"/>
+                  <TextBlock Style="{StaticResource Help}" Text="Pause stops both watchdogs from acting - for maintenance, an update, or closing NinjaTrader on purpose - and always ends by itself (24 hours at most). Stop switches Guard off until you start it again."/>
+                  <WrapPanel Margin="0,12,0,0">
                     <Button x:Name="ToolPause30" Content="30 min" Style="{StaticResource Btn}"/>
                     <Button x:Name="ToolPause120" Content="2 h" Style="{StaticResource Btn}"/>
                     <Button x:Name="ToolPause480" Content="8 h" Style="{StaticResource Btn}"/>
                     <Button x:Name="ToolResume" Content="Resume" Style="{StaticResource BtnPrimary}"/>
-                  </StackPanel>
+                    <Button x:Name="ToolStop" Content="Stop Guard" Style="{StaticResource BtnDanger}"/>
+                    <Button x:Name="ToolStart" Content="Start Guard" Style="{StaticResource BtnPrimary}" Visibility="Collapsed"/>
+                  </WrapPanel>
                   <TextBlock x:Name="ToolPauseMsg" Style="{StaticResource Msg}" Margin="0,8,0,0"/>
                 </StackPanel>
               </Border>

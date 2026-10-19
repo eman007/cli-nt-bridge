@@ -11,6 +11,8 @@ $script:logLines = @(); $script:alerts = @(); $script:stateWrites = 0
 function Log($m) { $script:logLines += $m }
 function Send-Alert($title, $body, $prio) { $script:alerts += [pscustomobject]@{ title = $title; body = $body; prio = $prio } }
 function Write-State($s) { $script:stateWrites++ }
+$script:FX_STOPPED = $false
+function Test-GuardStopHeld { param($GuardHome) $script:FX_STOPPED }
 $stateDir = New-TestDir owhold
 Invoke-Expression (Get-OverwatchFunction 'Send-AlertOnce')
 Invoke-Expression (Get-OverwatchFunction 'Clear-AlertOnce')
@@ -69,6 +71,13 @@ Reset; $script:FX_LOCKED = $true; $script:FX_THROW = $true
 $script:state = [pscustomobject]@{ lockHoldAlertUtc = '' }; $state = $script:state
 Check 'the probe THROWS -> FAIL OPEN, the remedy still runs' ((Invoke-Guard) -eq 'KILL')
 $script:FX_THROW = $false
+
+'=== Guard stopped (Tools > Stop Guard) while this run was going: the kill is held'
+Reset; $script:FX_LOCKED = $false; $script:FX_STOPPED = $true
+$script:state = [pscustomobject]@{ lockHoldAlertUtc = '' }; $state = $script:state
+Check 'stopped -> does NOT kill' ((Invoke-Guard) -eq 'HELD')
+Check 'logs why, and pages nothing (the stop already paged)' ([bool]($script:logLines -match 'Guard was stopped') -and $script:alerts.Count -eq 0) "log: $($script:logLines -join ' | ')"
+$script:FX_STOPPED = $false
 
 '=== restarting a frozen NinjaTrader set to alert only, dry run, -WhatIfRemedy: never kills'
 $block = Get-OverwatchBlock 'if ($WhatIfRemedy -or $cfg.dryRunRemedy' '# ! NEVER KILL INTO A LOCKED SCREEN'

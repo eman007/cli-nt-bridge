@@ -155,6 +155,16 @@ Check 'exits 0' ($code -eq 0) $out
 Check 'did nothing: no heartbeat, no state' (-not (Test-Path (Join-Path $lockHome 'state\overwatch.heartbeat')) -and -not (Test-Path (Join-Path $lockHome 'state\overwatch.state.json')))
 Check 'and said why: its previous run, or a panel action (the fire drill holds it for minutes)' ((Read-AllText (Join-Path $lockHome 'logs\overwatch.log')) -match 'previous run or a panel action')
 
+'=== a run already going when Guard is stopped stands down (Tools > Stop Guard; Test-GuardStopHeld)'
+# The stop is stamped after this run's process began - as for a run that was mid-way when Stop was pressed.
+$stopHome = New-TestDir owstop
+Save-GuardConfig -Config $lc -GuardHome $stopHome
+[IO.File]::WriteAllText((Join-Path (Get-GuardPath state $stopHome) 'stopped.json'), ('{ "stoppedUtc": "' + [DateTime]::UtcNow.AddHours(1).ToString('o') + '" }'))
+$out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:AppDir 'Guard-Overwatch.ps1') -GuardHome $stopHome 2>&1 | Out-String
+$code = $LASTEXITCODE
+Check 'exits 0, saying it stood down' ($code -eq 0 -and (Read-AllText (Join-Path $stopHome 'logs\overwatch.log')) -match 'stand down: Guard was stopped') "$out $(Read-AllText (Join-Path $stopHome 'logs\overwatch.log'))"
+Check 'and acted on nothing: no state written' (-not (Test-Path (Join-Path $stopHome 'state\overwatch.state.json'))) ''
+
 '=== -Report reads only: answers, never writes, never acts'
 $reportHome = New-TestDir owreport
 $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:AppDir 'Guard-Overwatch.ps1') -Report -GuardHome $reportHome 2>&1 | Out-String

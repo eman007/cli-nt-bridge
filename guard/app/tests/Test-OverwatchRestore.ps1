@@ -67,11 +67,24 @@ Invoke-Expression (Get-OverwatchFunction 'StratKey')
 Invoke-Expression (Get-OverwatchFunction 'Send-AlertOnce')
 Invoke-Expression (Get-OverwatchFunction 'Clear-AlertOnce')
 Invoke-Expression (Get-OverwatchFunction 'Get-PositionState')
+# Guard stopped (Tools > Stop Guard) from the given check on: $null = never. Counted, so a stop that lands
+# mid-restore can be staged (see Test-GuardStopStart for the stop itself).
+$script:stopFromCheck = $null; $script:stopChecks = 0
+function Test-GuardStopHeld { param($GuardHome) $script:stopChecks++; ($null -ne $script:stopFromCheck -and $script:stopChecks -ge $script:stopFromCheck) }
 Invoke-Expression (Get-OverwatchFunction 'Invoke-StrategyRestore')
 
 function Reset { $script:logLines = @(); $script:alerts = @(); $script:enableCalls = @()
                  $script:gridRows = $script:GRID; $script:enabledAfter = @(); $script:cfg.Remove('reenableStrategies')
                  $script:FX_ACCT = [pscustomobject]@{ status = 'ok'; accounts = @() }; Clear-AlertOnce '' }
+
+'=== Guard stopped: a restore does nothing, also when the stop lands after it began'
+Reset; Set-Record $RECORDED; $script:enabledAfter = $RECORDED; $script:stopChecks = 0; $script:stopFromCheck = 1
+$r = Invoke-StrategyRestore 'we restarted it' 600
+Check 'stopped before it began: not done, nothing enabled' ($r -eq $false -and $script:enableCalls.Count -eq 0) "returned $r; enabled: $($script:enableCalls -join '|')"
+Reset; Set-Record $RECORDED; $script:enabledAfter = $RECORDED; $script:stopChecks = 0; $script:stopFromCheck = 2
+$r = Invoke-StrategyRestore 'we restarted it' 600
+Check 'stopped mid-way: still nothing enabled, and it says why' ($r -eq $false -and $script:enableCalls.Count -eq 0 -and [bool]($script:logLines -match 'Guard was stopped')) "returned $r; checks $($script:stopChecks); log: $($script:logLines -join ' | ')"
+$script:stopFromCheck = $null
 
 '=== the real post-restart case - 8 recorded, all off in the grid'
 Reset; Set-Record $RECORDED; $script:enabledAfter = $RECORDED

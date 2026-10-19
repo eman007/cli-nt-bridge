@@ -26,12 +26,15 @@ function Get-FeedGuardConfigPath {
 
 function ConvertTo-FeedGuardSettings {
     # guard.json (a loaded config hashtable) -> the add-on keys Guard owns, in the order they are written.
-    [CmdletBinding()] param([Parameter(Mandatory)][hashtable]$Config)
+    # -Stopped (Guard stopped from Tools): the add-on only watches - no reconnect, no recovery, no strategy
+    # switched back on, no push - until Start writes the file from guard.json again.
+    [CmdletBinding()] param([Parameter(Mandatory)][hashtable]$Config, [switch]$Stopped)
     $p = Get-GuardProtection $Config
     $a = $Config.alerts
     $url = ''; $format = 'json'
     if ($a.ntfyTopic) { $url = ([string]$a.ntfyServer).TrimEnd('/') + '/' + $a.ntfyTopic; $format = 'text' }   # ntfy shows the bare text
     elseif ($a.webhookUrl) { $url = [string]$a.webhookUrl }
+    if ($Stopped) { $p = @{ reconnect = $false; recoverSilentFeed = $false; reenableStrategies = $false }; $url = '' }
     $s = [ordered]@{}
     $s.watchdogInstruments = @($Config.watch.instruments | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
     $s.watchdogStaleSeconds = $Config.watch.staleSeconds
@@ -80,10 +83,10 @@ function Format-FeedGuardString([string]$Key, [string]$Value) {
 function Write-FeedGuardConfig {
     # Write AutoReconnect.config.json from guard.json and, when it changed, drop AutoReconnect.reload.
     # Returns @{ Path; Changed; Reloaded; Kept (other keys carried over); Note }. Never prints the
-    # alert address (the ntfy topic is the password to the alert channel).
-    [CmdletBinding()] param([Parameter(Mandatory)][hashtable]$Config, [string]$Nt8Dir, [switch]$NoReload)
+    # alert address (the ntfy topic is the password to the alert channel). -Stopped: see ConvertTo-FeedGuardSettings.
+    [CmdletBinding()] param([Parameter(Mandatory)][hashtable]$Config, [string]$Nt8Dir, [switch]$NoReload, [switch]$Stopped)
     $path = Get-FeedGuardConfigPath $Nt8Dir
-    $settings = ConvertTo-FeedGuardSettings $Config
+    $settings = ConvertTo-FeedGuardSettings $Config -Stopped:$Stopped
     $kept = @(); $note = ''
     $old = $null
     if (Test-Path $path) {

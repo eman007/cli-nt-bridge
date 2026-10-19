@@ -13,6 +13,7 @@ Import-Module (Join-Path $PSScriptRoot 'Guard.Start.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Guard.Overwatch.psm1')   # Invoke-BackupSave (Forget is a full save)
 Import-Module (Join-Path $PSScriptRoot 'Guard.FeedGuard.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Guard.Status.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Guard.Pause.psm1')       # Get-GuardStopPath
 
 $script:Toggles = @('relaunch', 'restartWhenFrozen', 'reconnect', 'recoverSilentFeed', 'restoreStrategies',
                     'reattachCharts', 'reenableStrategies', 'flattenUnprotected')
@@ -52,8 +53,11 @@ function Save-GuardPanelSettings {
         $msg += " NinjaTrader's folder was not found ($nt8), so the feed guard's settings are written the next time you save once it exists."
     } else {
         try {
-            $fg = Write-FeedGuardConfig -Config $Config -Nt8Dir $nt8
-            if ($fg.Changed) { $msg += ' The feed guard picks the change up within seconds (or at NinjaTrader''s next start).' }
+            # While Guard is stopped the add-on keeps only watching; Start writes these settings to it.
+            $stopped = Test-Path -LiteralPath (Get-GuardStopPath $GuardHome)
+            $fg = Write-FeedGuardConfig -Config $Config -Nt8Dir $nt8 -Stopped:$stopped
+            if ($stopped) { $msg += ' Guard is stopped: the feed guard gets these settings when you start Guard again.' }
+            elseif ($fg.Changed) { $msg += ' The feed guard picks the change up within seconds (or at NinjaTrader''s next start).' }
             if ($fg.Note) { $msg += " Note: $($fg.Note)" }
         } catch { $msg += " The feed guard's settings could not be written: $($_.Exception.Message)" }
     }

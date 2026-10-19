@@ -65,6 +65,7 @@ Invoke-Expression (Get-OverwatchFunction 'StratKey')
 Invoke-Expression (Get-OverwatchFunction 'Send-AlertOnce')
 Invoke-Expression (Get-OverwatchFunction 'Clear-AlertOnce')
 Invoke-Expression (Get-OverwatchFunction 'Get-PositionState')
+function Test-GuardStopHeld { param($GuardHome) $false }     # Guard not stopped (Tools > Stop Guard): see Test-GuardStopStart
 Invoke-Expression (Get-OverwatchFunction 'Invoke-StrategyRestore')
 
 function Reset {

@@ -35,12 +35,12 @@ fonts (IBM Plex, SIL Open Font License - `panel\fonts\OFL.txt`).
 
 | Tab | What it is for |
 |---|---|
-| **Status** | One card per piece - NinjaTrader, its market data, the auto-login, the two watchdogs, the two add-ons, the strategy backups, phone alerts - green, amber or red, with what to do about anything not green. Recent events below. **Pause** here. |
+| **Status** | One card per piece - NinjaTrader, its market data, the auto-login, the two watchdogs, the two add-ons, the strategy backups, phone alerts - green, amber or red, with what to do about anything not green. Recent events below. **Pause** here - or, while Guard is stopped, **Start Guard**. |
 | **Protection** | The preset (Watch only / Recover NT8 / Hands-off) and each switch on its own. Off means Guard only alerts. |
 | **Alerts** | Phone alerts through ntfy: a private random topic, a QR code to subscribe, how loud each kind of alert is, an optional webhook, and Send a test. The topic and the webhook address stay hidden until you press Show (a webhook address carries its own key). |
 | **Strategy backups** | Every strategy Guard has saved: account, instrument, chart, when it was saved, and whether it is on NinjaTrader's list, missing (dropped across a restart) or removed by you. Save now; **Put back now** a missing one (or all of them) and **Bring back** one you removed - see below; Forget one that is gone for good. |
 | **Watch list** | The instruments the feed guard watches, how long a silence counts as a dead feed, extra closed days - and what the feed guard made of the list right now (current contracts, the connection serving them, the next closure). |
-| **Tools** | Test alert, pause, **Test login**, the **fire drill**, a diagnostics zip for a bug report (alert address, Windows user name and PC name masked; no password or strategy settings), the folders, and **Uninstall**. |
+| **Tools** | Test alert, pause or **stop**, **Test login**, the **fire drill**, a diagnostics zip for a bug report (alert address, Windows user name and PC name masked; no password or strategy settings), the folders, and **Uninstall**. |
 
 The panel only **reads** what the watchdogs and add-ons write (every 2 seconds, off the window's
 thread) and writes settings, the pause and the backup list when you ask. It does no watchdog work, so
@@ -121,7 +121,7 @@ holds any of those, or one where NinjaTrader's files sit.
 
 Every start goes through the same rules, whichever part of Guard asks:
 
-- **Paused** (see below).
+- **Paused** or **stopped** (see below).
 - **The screen is locked.** The password cannot reach NinjaTrader's window behind the lock screen, so
   Guard waits and starts it within a minute of the unlock.
 - **Backoff.** 4 starts or stops within 30 minutes and NinjaTrader still is not staying up → no starts
@@ -285,7 +285,7 @@ written back exactly as the add-on read them. If the existing file cannot be rea
 keeps it as `AutoReconnect.config.json.bak` before writing a fresh one - copy your own settings back
 from it.
 
-## Pausing
+## Pausing and stopping
 
 Closing NinjaTrader on purpose? Pause first (the panel's Status tab: 30 min, 2 h or 8 h), or the
 relauncher starts it again within a minute. A pause always ends by itself (24 hours at most):
@@ -295,6 +295,23 @@ Import-Module .\lib\Guard.Pause.psm1
 Set-GuardPause -Minutes 30 -Reason 'maintenance'
 Clear-GuardPause
 ```
+
+**Stop** (Tools) is for longer, and never ends by itself: Guard does nothing until you press **Start
+Guard** - on the Status tab or in Tools. Its three tasks are switched off (Task Scheduler shows them
+*Disabled*), the feed guard inside NinjaTrader is told to only watch (no reconnect, no recovery, no
+strategy switched back on, no push), your phone gets one alert, and Status shows STOPPED. Settings, the
+saved password, the backups and the logs are kept. A watchdog check that was already running when you
+pressed Stop (one can take minutes) stands down at its next step - before any reconnect, flatten,
+re-enable, start or kill - and Stop waits for it (90 s at most, then says it is still finishing). A setting saved while stopped reaches the feed guard at Start. A task that
+will not switch off switches back on the ones Stop switched off, so Guard is never half stopped. While
+stopped, Put back now, Bring back, Test login and the fire drill refuse: each counts on Guard running.
+
+**Start Guard** switches the tasks on, gives the feed guard your settings back and runs both watchdogs
+once - so a closed NinjaTrader is started within a minute (as Protection allows). The stop ends only once
+the feed guard has your settings back; if they cannot be written, Status keeps saying so. Installing both
+watchdog tasks again (the setup, or `Register-GuardTasks.ps1`) also ends a stop. `state\stopped.json` records that the
+stop was on purpose, but the tasks' own state is what counts: switched on by hand in Task Scheduler, Guard
+runs - though the feed guard keeps only watching until you press Start Guard (a Status banner says so).
 
 ## Protection presets
 

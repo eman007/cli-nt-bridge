@@ -70,4 +70,24 @@ foreach ($c in $Components) {
     $results += [pscustomobject]$row
 }
 $results | Format-Table -AutoSize | Out-String | Write-Host
+# Installing tasks while Guard is stopped (Tools > Stop Guard) ends the stop once BOTH watchdog tasks are
+# on - asked of the scheduler, because the setup installs one task per run. The feed guard gets guard.json's
+# settings back first - Stop left it only watching - and only then does the stop's file go; if they cannot
+# be written the file stays, and Status says so and offers Start Guard.
+$stopFile = Join-Path (Get-GuardPath state $gh) 'stopped.json'
+$taskOn = { param($n) $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue; [bool]$t -and [string]$t.State -ne 'Disabled' }
+if (@($results | Where-Object { $_.Registered }).Count -and (Test-Path -LiteralPath $stopFile) -and
+    (& $taskOn "$TaskPrefix-Relaunch") -and (& $taskOn "$TaskPrefix-Overwatch")) {
+    try {
+        Import-Module (Join-Path $PSScriptRoot 'lib\Guard.Config.psm1')
+        Import-Module (Join-Path $PSScriptRoot 'lib\Guard.Events.psm1')
+        Import-Module (Join-Path $PSScriptRoot 'lib\Guard.FeedGuard.psm1')
+        $cfg = Get-GuardConfig $gh
+        $nt8Dir = Get-Nt8DataDir ([string]$cfg.nt8.dataDir)
+        if (Test-Path -LiteralPath $nt8Dir) { Write-FeedGuardConfig -Config $cfg -Nt8Dir $nt8Dir | Out-Null }
+        Remove-Item -LiteralPath $stopFile -Force
+        Write-GuardEvent -Component guard -Kind 'guard.started' -Severity info -Text 'Guard running again: its tasks were installed' -GuardHome $gh
+        Write-Host 'Guard was stopped; it is running again (the feed guard has your settings back).'
+    } catch { Write-Host "Guard was stopped; its tasks run again, but the feed guard still only watches - its settings could not be written: $($_.Exception.Message). Press Start Guard in the control panel." }
+}
 if (@($results | Where-Object { $_.Heartbeat -ne 'ok' -and $_.Heartbeat -notlike 'skipped*' }).Count) { exit 1 } else { exit 0 }

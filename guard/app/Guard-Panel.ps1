@@ -158,7 +158,7 @@ function Set-PanelMessage([string]$Name, [string]$Text, [ValidateSet('ok', 'bad'
 
 # ------------------------------------------------------------------ reading: status, backups, watch list
 function Update-PanelStatus($Status) {
-    $tone = @{ ok = 'Live'; warn = 'Warn'; bad = 'Danger'; paused = 'Accent' }[[string]$Status.Overall.State]
+    $tone = @{ ok = 'Live'; warn = 'Warn'; bad = 'Danger'; paused = 'Accent'; stopped = 'Danger' }[[string]$Status.Overall.State]
     (Ui 'OverallText').Text = $Status.Overall.Text
     (Ui 'OverallText').Foreground = Res $tone
     (Ui 'OverallDot').Fill = Res $tone
@@ -174,9 +174,19 @@ function Update-PanelStatus($Status) {
     if ($esig -ne $script:EventSig) { $script:EventSig = $esig; (Ui 'Events').ItemsSource = @($Status.Events) }
     (Ui 'EventsEmpty').Visibility = $(if (@($Status.Events).Count) { 'Collapsed' } else { 'Visible' })
 
-    $paused = [bool]$Status.Pause.Paused
-    (Ui 'PauseIdle').Visibility = $(if ($paused) { 'Collapsed' } else { 'Visible' })
+    # Stopped wins over paused: a pause means nothing while the tasks are off.
+    $stopped = [bool]($Status.PSObject.Properties['Stop'] -and $Status.Stop.Stopped)
+    $paused = (-not $stopped) -and [bool]$Status.Pause.Paused
+    (Ui 'PauseIdle').Visibility = $(if ($paused -or $stopped) { 'Collapsed' } else { 'Visible' })
     (Ui 'PauseActive').Visibility = $(if ($paused) { 'Visible' } else { 'Collapsed' })
+    (Ui 'StopActive').Visibility = $(if ($stopped) { 'Visible' } else { 'Collapsed' })
+    if ($stopped) {
+        (Ui 'StopText').Text = $(if ($Status.Stop.SinceUtc) { "Guard has been stopped since $(Format-GuardTime -Utc $Status.Stop.SinceUtc -NowUtc $Status.NowUtc)" } else { 'Guard is stopped' })
+    }
+    (Ui 'ToolStop').Visibility = $(if ($stopped) { 'Collapsed' } else { 'Visible' })
+    $canStart = [bool]($Status.PSObject.Properties['Stop'] -and $Status.Stop.PSObject.Properties['CanStart'] -and $Status.Stop.CanStart)
+    (Ui 'ToolStart').Visibility = $(if ($stopped -or $canStart) { 'Visible' } else { 'Collapsed' })
+    foreach ($n in 'ToolPause30', 'ToolPause120', 'ToolPause480') { (Ui $n).IsEnabled = -not $stopped }
     if ($paused) {
         $until = Format-GuardTime -Utc $Status.Pause.UntilUtc -NowUtc $Status.NowUtc
         (Ui 'PauseText').Text = "Paused until $until" + $(if ($Status.Pause.Reason) { " - $($Status.Pause.Reason)" } else { '' })
@@ -430,13 +440,13 @@ function Step-PanelRefresh {
 function Step-PanelTimer { Complete-PanelAction; Update-PanelActionSteps; Step-PanelRefresh }
 
 # ------------------------------------------------------------------ the buttons that touch NinjaTrader
-# Put back now / Bring back, Test login, Fire drill, Uninstall (Guard.Actions). Each runs in the background
+# Put back now / Bring back, Test login, Fire drill, Stop / Start, Uninstall (Guard.Actions). Each runs in the background
 # runspace while the action overlay lists its steps as they happen, then shows the result. The steps come
 # back through a synchronized hashtable the action writes and the timer reads - never a scriptblock handed
 # across runspaces. Tests put fakes in $script:ActionSeams.<action> and run the action in-process.
 $script:ActionSeams = @{}
 $script:ActionFns = @{ putback = 'Invoke-GuardPutBack'; testlogin = 'Invoke-GuardTestLogin'; drill = 'Invoke-GuardFireDrill'; uninstall = 'Invoke-GuardUninstall'
-                       finish = 'Invoke-GuardSetupFinish' }
+                       stop = 'Invoke-GuardStop'; start = 'Invoke-GuardStart'; finish = 'Invoke-GuardSetupFinish' }
 
 function Start-PanelRiskyAction([string]$Action, [string]$Title, [hashtable]$Params, [string]$MsgName) {
     if ($script:Action) { Set-PanelFooter "Still busy: $($script:Action.Label). Try again when it finishes."; return }
@@ -500,6 +510,20 @@ function Confirm-PanelDrill([string]$MsgName) {
     Show-PanelConfirm 'Run the fire drill?' ("For about $([math]::Ceiling(($stale + 60) / 60) + 1) minutes the feed guard ignores the market data, as if the feed died. It should notice, re-subscribe, then disconnect and reconnect the connection serving your watch list - " +
                                              "NinjaTrader switches the strategies on that connection off, so Guard first checks with the NT8 link that you are flat. Strategies you switched off to be flat stay off. Your phone gets the alerts a real outage sends.") 'Run the drill' {
         Start-PanelRiskyAction drill 'Fire drill' @{ Config = (Get-GuardConfig $GuardHome); GuardHome = $GuardHome; Nt8Dir = $Nt8Dir } $script:ConfirmMsg
+    }
+}
+
+function Confirm-PanelStop {
+    Show-PanelConfirm 'Stop NT8 Guard?' ("Guard's tasks are switched off until you press Start Guard - unlike a pause, a stop never ends by itself. Until then nothing restarts NinjaTrader after a crash or a freeze, nothing puts a strategy back, and nothing alerts you; " +
+                                      "the feed guard inside NinjaTrader only watches (no reconnect, no recovery). NinjaTrader keeps running. Settings, the saved password, the backups and the logs are kept. Your phone gets one alert that Guard is stopped.") 'Stop Guard' {
+        Start-PanelRiskyAction stop 'Stopping NT8 Guard' @{ Config = (Get-GuardConfig $GuardHome); GuardHome = $GuardHome; Nt8Dir = $Nt8Dir } 'ToolPauseMsg'
+    }
+}
+
+function Confirm-PanelStart {
+    Show-PanelConfirm 'Start NT8 Guard?' ("Guard's tasks are switched on, the feed guard gets your settings back, and both watchdogs run once now. " +
+                                       "If NinjaTrader is closed, Guard starts it and logs in within a minute (as Protection allows) - if it should stay closed, pause Guard right after this.") 'Start Guard' {
+        Start-PanelRiskyAction start 'Starting NT8 Guard' @{ Config = (Get-GuardConfig $GuardHome); GuardHome = $GuardHome; Nt8Dir = $Nt8Dir } 'ToolPauseMsg'
     }
 }
 
@@ -717,6 +741,9 @@ function Register-PanelHandlers {
     }
     (Ui 'Resume').Add_Click({ Invoke-PanelPause 0 })
     (Ui 'ToolResume').Add_Click({ Invoke-PanelPause 0 })
+    (Ui 'ToolStop').Add_Click({ Confirm-PanelStop })
+    (Ui 'ToolStart').Add_Click({ Confirm-PanelStart })
+    (Ui 'StartGuard').Add_Click({ Confirm-PanelStart })
     (Ui 'OpenLogs').Add_Click({ Open-PanelFolder (Get-GuardPath logs $GuardHome) })
     (Ui 'FolderLogs').Add_Click({ Open-PanelFolder (Get-GuardPath logs $GuardHome) })
     (Ui 'FolderGuard').Add_Click({ Open-PanelFolder (Get-GuardHome $GuardHome) })

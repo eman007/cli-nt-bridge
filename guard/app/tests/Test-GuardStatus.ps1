@@ -315,6 +315,66 @@ Check 'an expired pause reads as not paused' (-not $s.Pause.Paused -and $s.Overa
 Check 'and the file is left for the watchdogs' (Test-Path $pp) ''
 Check 'no pause.expired event written by reading' (@(Read-GuardEvents -KindPattern '^pause\.expired$').Count -eq 0) ''
 
+'--- stopped (Tools > Stop Guard): the file says on purpose, the tasks say whether it still holds'
+New-Healthy | Out-Null
+$stopFile = Get-GuardStopPath
+[IO.File]::WriteAllText($stopFile, ([ordered]@{ stoppedUtc = $now.AddMinutes(-20).ToString('o'); reason = 'from the control panel' } | ConvertTo-Json))
+$asked = New-Object System.Collections.Generic.List[string]
+$off = { param($name) $asked.Add($name); 'Disabled' }
+$s = Get-S @{ TaskState = $off }
+Check 'STOPPED overrides the pill, with since when' ($s.Overall.State -eq 'stopped' -and $s.Overall.Text -eq 'STOPPED since 14:40') $s.Overall.Text
+Check 'the stop object' ($s.Stop.Stopped -and $s.Stop.SinceUtc -eq $now.AddMinutes(-20)) "$($s.Stop.Stopped) $($s.Stop.SinceUtc)"
+Check 'with its file, the scheduler is asked even while the heartbeats are fresh' ((@($asked | Select-Object -Unique) -join ',') -eq 'NT8Guard-Relaunch,NT8Guard-Overwatch') (@($asked) -join ',')
+Check 'watchdogs card off: stopped, and how to start it' ((Card $s watchdogs).State -eq 'off' -and (Card $s watchdogs).Headline -eq 'Stopped since 14:40' -and (Card $s watchdogs).Remedy -match 'Start Guard') "$((Card $s watchdogs).Headline) / $((Card $s watchdogs).Remedy)"
+Check 'no card or banner claims Guard will act' ((AllText $s) -notmatch 'Guard restarts|starts it within') (AllText $s)
+$s = Get-S @{ TaskState = $off; Processes = $none }
+Check 'NinjaTrader down while stopped: off, Guard will not start it' ((Card $s nt8).State -eq 'off' -and (Card $s nt8).Detail -match 'stopped, so it will not start') (Card $s nt8).Detail
+$frozen = { , @([pscustomobject]@{ Id = 42; StartUtc = $now.AddMinutes(-30); Responding = $false; Title = 'Control Center' }) }
+$s = Get-S @{ TaskState = $off; Processes = $frozen }
+Check 'NinjaTrader frozen while stopped: no promise of a restart' ((Card $s nt8).Detail -match 'stopped, so it will not restart' -and (Card $s nt8).Detail -notmatch 'Guard restarts') (Card $s nt8).Detail
+$ccHung = { , @([pscustomobject]@{ Id = 42; StartUtc = $now.AddMinutes(-30); Responding = $true; Title = 'Control Center'; ControlCenterHung = $true }) }
+$s = Get-S @{ TaskState = $off; Processes = $ccHung }
+Check 'the Control Center frozen while stopped: the same' ((Card $s nt8).Headline -eq 'Control Center not responding' -and (Card $s nt8).Detail -match 'stopped, so it will not restart') (Card $s nt8).Detail
+Set-GuardPause -Minutes 30 -Reason 'test' | Out-Null
+$s = Get-S @{ TaskState = $off; NowUtc = [DateTime]::UtcNow }
+Check 'stopped wins over paused' ($s.Overall.State -eq 'stopped' -and (Card $s watchdogs).Headline -match '^Stopped') "$($s.Overall.Text) / $((Card $s watchdogs).Headline)"
+Clear-GuardPause
+$s = Get-S @{ TaskState = { param($n) 'Ready' } }
+Check 'tasks switched on again by hand: running, whatever the file says' (-not $s.Stop.Stopped -and $s.Overall.State -ne 'stopped' -and (Card $s watchdogs).State -eq 'ok') "$($s.Overall.Text) / $((Card $s watchdogs).Headline)"
+Check 'but the feed guard still only watches: a banner says to press Start Guard' ($s.Stop.Leftover -and $s.Overall.State -eq 'warn' -and @($s.Banner | Where-Object { $_ -match 'Start Guard' }).Count -eq 1) (@($s.Banner) -join ' | ')
+$s = Get-S @{ TaskState = { param($n) if ($n -like '*Relaunch') { 'Disabled' } else { 'Running' } } }
+Check 'one watchdog on: not stopped' (-not $s.Stop.Stopped) $s.Overall.Text
+$s = Get-S @{ TaskState = { param($n) $null } }
+Check 'its file and no tasks at all: stopped' ($s.Stop.Stopped) $s.Overall.Text
+[IO.File]::WriteAllText($stopFile, '{ not json')
+$s = Get-S @{ TaskState = $off }
+Check 'an unreadable file still counts, with no time' ($s.Stop.Stopped -and $s.Overall.Text -eq 'STOPPED' -and -not $s.Stop.SinceUtc) $s.Overall.Text
+[IO.File]::WriteAllText($stopFile, ([ordered]@{ stoppedUtc = $now.AddMinutes(-20).ToString('o') } | ConvertTo-Json))
+Set-FeedGuardBeat 5 @{ autoRecover = $true }
+$s = Get-S @{ TaskState = $off }
+Check 'stopped, but the feed guard still recovering 20 min later: a banner says it did not take the stop' (@($s.Banner | Where-Object { $_ -match 'did not take the stop' }).Count -eq 1) (@($s.Banner) -join ' | ')
+Set-FeedGuardBeat 5 @{ autoRecover = $false; lastL1AgeSeconds = 300 }
+$s = Get-S @{ TaskState = $off }
+Check 'once it only watches: no banner, and a silent feed says why nothing recovers it' (-not @($s.Banner | Where-Object { $_ -match 'did not take the stop' }).Count -and (Card $s feed).Detail -match 'Guard is stopped, so the feed guard only watches') "$((Card $s feed).Detail) | $(@($s.Banner) -join ' | ')"
+Set-FeedGuardBeat 5
+Remove-Item $stopFile
+$asked.Clear()
+$s = Get-S @{ TaskState = $off }
+Check 'no file: not stopped, and fresh heartbeats keep the scheduler unasked' (-not $s.Stop.Stopped -and $asked.Count -eq 0) (@($asked) -join ',')
+Check 'and nothing to start' (-not $s.Stop.CanStart) ''
+Set-Beat (Join-Path (Get-GuardPath state) 'relaunch.heartbeat') 900
+$s = Get-S @{ TaskState = $off }
+Check 'a watchdog task switched off by hand, no stop file: Start Guard is offered' (-not $s.Stop.Stopped -and $s.Stop.CanStart) ''
+
+'--- the task-state cache: asked again after a Stop or a Start'
+$mod = Get-Module Guard.Status
+& $mod { $script:TaskCache = @{}; $script:schedAsked = 0; function script:Get-ScheduledTask { param($TaskName, $ErrorAction) $script:schedAsked++; [pscustomobject]@{ State = 'Ready' } } }
+$c1 = & $mod { param($t) $null = Get-CachedTaskState 'T' $t $null; $script:schedAsked } $now
+$c2 = & $mod { param($t) $null = Get-CachedTaskState 'T' $t.AddSeconds(10) $null; $script:schedAsked } $now
+$c3 = & $mod { param($t) $null = Get-CachedTaskState 'T' $t.AddSeconds(20) $t.AddSeconds(15); $script:schedAsked } $now
+Check 'asked once, then cached, then asked again for an answer older than the last Stop/Start' ($c1 -eq 1 -and $c2 -eq 1 -and $c3 -eq 2) "$c1 $c2 $c3"
+& $mod { Remove-Item function:Get-ScheduledTask -ErrorAction SilentlyContinue; $script:TaskCache = @{} }
+
 '--- backup list (Strategy backups tab)'
 New-Healthy | Out-Null
 Set-Registry @(@{ Name = 'Zed'; Class = 'DemoStrategy'; State = 'removed' }, @{ Name = 'Beta'; Class = 'DemoStrategy'; State = 'live'; Tab = 'ES 5m' },

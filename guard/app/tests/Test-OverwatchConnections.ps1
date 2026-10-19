@@ -53,6 +53,8 @@ function Invoke-Bridge($kind, $fields, $timeout) {
 
 Invoke-Expression (Get-OverwatchFunction 'Read-CachedConnections')
 Invoke-Expression (Get-OverwatchFunction 'Update-ConnectionCache')
+$script:FX_STOPPED = $false
+function Test-GuardStopHeld { param($GuardHome) $script:FX_STOPPED }     # Tools > Stop Guard: see Test-GuardStopStart
 Invoke-Expression (Get-OverwatchFunction 'Invoke-ConnectionRestore')
 
 function Reset {
@@ -62,6 +64,12 @@ function Reset {
     $script:state.connAttemptUtc = ''
     $script:cfg.dryRunRemedy = $false; $script:cfg.connSettleSeconds = 10; $script:cfg.reconnect = $true
 }
+
+'=== Guard stopped (Tools > Stop Guard) while the restore was going: no reconnect is sent'
+Reset; Set-ConnRecord @('Demo Feed', 'BrokerA', 'BrokerB'); $script:FX_STOPPED = $true
+$r = Invoke-ConnectionRestore 'we restarted it' $script:FX_UP_READY
+Check 'nothing reconnected, not reported as done, and it says why' ($script:connectCalls.Count -eq 0 -and $r -eq $false -and [bool]($script:logLines -match 'Guard was stopped')) "calls: $($script:connectCalls -join '|'); returned $r"
+$script:FX_STOPPED = $false
 
 '=== the 2026-09-08 case - two broker connections live before, only the demo feed back after'
 Reset; Set-ConnRecord @('Demo Feed', 'BrokerA', 'BrokerB')

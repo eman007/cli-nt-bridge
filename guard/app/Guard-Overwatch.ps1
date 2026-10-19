@@ -592,6 +592,7 @@ function Invoke-ConnectionRestore([string]$reason, $upSeconds) {
         # The NT8 link reads the name from "connection" (nt8bridge reconnect.py's contract). Until 2026-10 this
         # sent "name": the link answered "reconnect requires a connection name", nothing logged that answer,
         # and every reconnect read as "STILL DOWN after 30s".
+        if (Test-GuardStopHeld -GuardHome $GuardHome) { Log "connections [$reason]: not reconnecting '$n' - Guard was stopped"; return $false }
         $r = Invoke-Bridge 'reconnect' @{ connection = $n } $cfg.bridgeTimeoutSeconds
         if ($null -eq $r) { Log "connections [$reason]: '$n' - reconnect did not answer" }
         elseif ($r.status -ne 'ok') {
@@ -655,6 +656,7 @@ function Invoke-StrategyRestore([string]$reason, $upSeconds) {
     # when that happens (2026-09-21). So a NOT-READY connection restore defers this whole pass; the
     # caller retries next cycle, and the deferral is bounded so a broker outage cannot keep the grid
     # off all session.
+    if (Test-GuardStopHeld -GuardHome $GuardHome) { Log "restore [$reason]: not done - Guard was stopped while this run was going"; return $false }
     if (-not (Invoke-ConnectionRestore $reason $upSeconds)) {
         $waited = $null
         if ($state.restoreDeferSinceUtc) { try { $waited = ([DateTime]::UtcNow - [DateTime]::Parse($state.restoreDeferSinceUtc).ToUniversalTime()).TotalMinutes } catch { } }
@@ -797,6 +799,7 @@ function Invoke-StrategyRestore([string]$reason, $upSeconds) {
             if (-not $cfg.flattenNakedBeforeEnable) { $naked += "$what - closing an unprotected position is set to alert only"; continue }
             if ($cfg.dryRunRemedy) { $naked += "$what - DRY RUN, no order sent"; continue }
 
+            if (Test-GuardStopHeld -GuardHome $GuardHome) { Log "restore [$reason]: stopped before flattening $what - Guard was stopped"; return $false }
             Log "restore [$reason]: $what is NAKED (no working orders) -> flattening before re-enable"
             $f = Invoke-Bridge 'flatten' @{ account = $t.account; instrument = $t.instrument } $cfg.bridgeTimeoutSeconds
             if ($null -eq $f) { $failed += "$what (flatten did not answer)"; continue }
@@ -842,6 +845,7 @@ function Invoke-StrategyRestore([string]$reason, $upSeconds) {
         if ($missing.Count -eq 0) { Log "restore [$reason]: nothing left to re-enable after the exposure gate"; return $true }
     }
 
+    if (Test-GuardStopHeld -GuardHome $GuardHome) { Log "restore [$reason]: not re-enabling - Guard was stopped"; return $false }
     Log "restore [$reason]: re-enabling $($missing.Count): $($missing -join ', ')"
     $res = Invoke-Bridge 'strategies' @{ enable = ($missing -join ','); settleMs = '5000' } $cfg.bridgeTimeoutSeconds
     if ($null -eq $res) {
@@ -896,6 +900,7 @@ function Invoke-DuplicateWatch {
 # 'one start at a time' hold here exactly as for the relauncher. Logged and alerted once per outage.
 function Invoke-OverwatchDown {
     $state.consecutive = 0; $state.fault = ''
+    if (Test-GuardStopHeld -GuardHome $GuardHome) { Log 'stand down: Guard was stopped while this run was going - NinjaTrader is not started'; return }
     if (Test-RelauncherFresh -GuardHome $GuardHome -MaxAgeSeconds ([int]$cfg.relauncherStaleSeconds)) {
         # Starts held back by the backoff: say so - "the relauncher starts it" read as a broken promise (2026-10-10).
         $bo = Join-Path $stateDir 'start.backoff-until'
@@ -963,6 +968,12 @@ $nt = @(Get-GuardSessionProcess -Name 'NinjaTrader') | Select-Object -First 1
 if ((Get-GuardPauseState -Component overwatch -GuardHome $GuardHome -Nt8Dir $base).Paused) {
     if ($Report) { Write-VerdictAndExit $nt 'Guard is paused' }
     exit 0
+}
+# Stopped from the panel while this run was already going (its task is off now): stand down. Checked
+# again before every step that acts - a run can take minutes (Test-GuardStopHeld).
+if (Test-GuardStopHeld -GuardHome $GuardHome) {
+    if ($Report) { Write-VerdictAndExit $nt 'Guard is stopped' }
+    Log 'stand down: Guard was stopped (Tools > Stop Guard)'; exit 0
 }
 $state = Read-State
 
@@ -1472,6 +1483,10 @@ if ($consoleLocked) {
 }
 $state.lockHoldAlertUtc = ''
 
+if (Test-GuardStopHeld -GuardHome $GuardHome) {
+    Log "REMEDY HELD: Guard was stopped while this run was going - NinjaTrader (pid $($nt.Id), $fault) is left as it is"
+    Write-State $state; exit 0
+}
 $dumpNote = $(if ($cfg.dumpBeforeKill) { "`nSaving a crash report first (up to $($cfg.dumpTimeoutSeconds)s)." } else { '' })
 Send-Alert "NT8 $fault - restarting" "$detail`nExposure: $exposure$dumpNote`nKilling NinjaTrader; the relauncher will bring it back." '5'
 
@@ -1495,6 +1510,12 @@ if ($responding -and $fault -ne 'CONTROL_CENTER_HUNG') {
 $dumpPath = $null
 try { $dumpPath = Save-NT8Dump $nt.Id $fault } catch { Log "dump: unexpected error - $($_.Exception.Message)" }
 
+# A dump can take minutes: a stop pressed meanwhile still wins.
+if (Test-GuardStopHeld -GuardHome $GuardHome) {
+    Log "REMEDY HELD: Guard was stopped during the crash report - NinjaTrader (pid $($nt.Id), $fault) is left running"
+    Send-Alert "NT8 $fault - NOT restarted (Guard stopped)" "Guard was stopped from the control panel while it was about to restart NinjaTrader, so NinjaTrader was left running.`n$detail" '5'
+    Write-State $state; exit 0
+}
 try {
     Stop-Process -Id $nt.Id -Force -ErrorAction Stop
     Log "killed NinjaTrader.exe pid=$($nt.Id)"

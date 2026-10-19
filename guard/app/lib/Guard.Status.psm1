@@ -15,6 +15,7 @@ Import-Module (Join-Path $PSScriptRoot 'Guard.Config.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Guard.Events.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Guard.Alerts.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Guard.Overwatch.psm1')   # Get-BackupAdvice: one wording for missing strategies
+Import-Module (Join-Path $PSScriptRoot 'Guard.Pause.psm1')       # Get-GuardStopPath (Stop's file; this module only reads it)
 
 # The OLDEST feed guard add-on this Guard works with: the Status note, the wizard's add-on light and the
 # fire drill (which follows the events 5.0.0 started writing) all gate on it, so raise it only when Guard
@@ -29,9 +30,10 @@ $script:Inv = [Globalization.CultureInfo]::InvariantCulture
 $script:TaskCache = @{}
 $script:VersionCache = $null
 
-function Get-CachedTaskState([string]$Name, [DateTime]$NowUtc) {
+function Get-CachedTaskState([string]$Name, [DateTime]$NowUtc, $FreshAfterUtc) {
+    # -FreshAfterUtc: an answer older than that (Guard stopped since) is asked again.
     $hit = $script:TaskCache[$Name]
-    if ($hit -and ($NowUtc - $hit.At).TotalSeconds -lt 60) { return $hit.State }
+    if ($hit -and ($NowUtc - $hit.At).TotalSeconds -lt 60 -and -not ($FreshAfterUtc -is [DateTime] -and $hit.At -lt $FreshAfterUtc)) { return $hit.State }
     $t = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
     $st = $(if ($t) { [string]$t.State } else { $null })
     $script:TaskCache[$Name] = @{ At = $NowUtc; State = $st }
@@ -159,7 +161,7 @@ function Get-GuardStatus {
                 [pscustomobject]@{ Id = $_.Id; StartUtc = $start; Responding = $_.Responding; Title = $_.MainWindowTitle; ControlCenterHung = $ccHung } })
         }
     }
-    if (-not $TaskState) { $TaskState = { param($n) Get-CachedTaskState $n $now } }
+    if (-not $TaskState) { $TaskState = { param($n) Get-CachedTaskState $n $now $taskFreshAfter } }
     if ([string]$Nt8Version -eq 'auto') { $Nt8Version = Get-CachedNt8Version ([string]$Config.nt8.programDir) $now }
     # An event's time may not parse (a damaged or hand-edited line): '?' then, never a failed status read.
     $T = { param($u) if ($u -is [DateTime]) { Format-GuardTime -Utc $u -NowUtc $now -TimeZone $TimeZone } else { '?' } }
@@ -172,6 +174,26 @@ function Get-GuardStatus {
     $nt = @(& $Processes) | Select-Object -First 1
     $ntStart = $(if ($nt) { $nt.StartUtc } else { $null })
     $events = @(Read-GuardEvents -GuardHome $GuardHome -Nt8Dir $Nt8Dir -Max 400)
+
+    # ---- stopped (Tools > Stop Guard): its file says it was on purpose, the tasks say whether it still holds -
+    # switched on again by hand or by the setup, Guard runs whatever the file says. Only then is the
+    # scheduler asked every minute, and once at once after a stop.
+    # An unreadable file still counts (when is then unknown): Save and the risky actions go by the file too.
+    $stopFile = Get-GuardStopPath $GuardHome
+    $stopDoc = $(if (Test-Path -LiteralPath $stopFile) { $d = Read-JsonFile $stopFile; if ($d) { $d } else { [pscustomobject]@{ stoppedUtc = '' } } } else { $null })
+    $stopSince = $(if ($stopDoc) { ConvertFrom-GuardUtc ([string]$stopDoc.stoppedUtc) } else { $null })
+    # A cached task state from before the last Stop or Start is asked again.
+    $lastStart = @($events | Where-Object { $_.kind -eq 'guard.started' } | Select-Object -First 1)
+    $startedUtc = $(if ($lastStart.Count) { ConvertFrom-GuardUtc ([string]$lastStart[0].utc) } else { $null })
+    $taskFreshAfter = @($stopSince, $startedUtc | Where-Object { $_ -is [DateTime] } | Sort-Object -Descending) | Select-Object -First 1
+    # Leftover: the file is there but the tasks run - switched on outside the panel. The feed guard was told
+    # to only watch and stays so until Start (a banner says so, and Tools offers Start Guard).
+    $stop = [pscustomobject]@{ Stopped = $false; SinceUtc = $null; Leftover = $false }
+    if ($stopDoc) {
+        $on = @(foreach ($tn in 'NT8Guard-Relaunch', 'NT8Guard-Overwatch') { $ts = $null; try { $ts = & $TaskState $tn } catch { }; if ($ts -and $ts -ne 'Disabled') { $tn } })
+        $stop = [pscustomobject]@{ Stopped = (-not $on.Count); SinceUtc = $(if ($on.Count) { $null } else { $stopSince }); Leftover = [bool]$on.Count }
+    }
+    $stopWhen = $(if ($stop.SinceUtc) { " since $(& $T $stop.SinceUtc)" } else { '' })
 
     # ---- the watchdogs (relauncher + overwatch): their heartbeats, every minute, also while paused
     $wdStale = [double]$Config.overwatch.relauncherStaleSeconds
@@ -187,6 +209,8 @@ function Get-GuardStatus {
         $wd[$c.k] = @{ Fresh = $fresh; Age = $age; Why = $why; Label = $c.label; Task = $c.task }
     }
     $anyWatchdog = ($wd.relaunch.Fresh -or $wd.overwatch.Fresh)
+    # Start Guard is offered whenever it has something to do: stopped, a stop left over, or a watchdog task off.
+    $stop | Add-Member -NotePropertyName CanStart -NotePropertyValue ($stop.Stopped -or $stop.Leftover -or [bool]@($wd.Values | Where-Object { $_.Why -eq 'its task is disabled' }).Count)
 
     # ---- add-on heartbeats
     $arPath = Join-Path $Nt8Dir 'AutoReconnect.heartbeat.json'
@@ -219,10 +243,10 @@ function Get-GuardStatus {
         $since = $(if ($ntStart) { "since $(& $T $ntStart)" } else { '' })
         $detail = (@($since, $verNote) | Where-Object { $_ }) -join ' - '
         if (-not $nt.Responding) {
-            $act = $(if ($prot.restartWhenFrozen) { 'Guard restarts it if it stays frozen' } else { 'Protection is set to alert only, so Guard will not restart it' })
+            $act = $(if ($stop.Stopped) { 'Guard is stopped, so it will not restart it' } elseif ($prot.restartWhenFrozen) { 'Guard restarts it if it stays frozen' } else { 'Protection is set to alert only, so Guard will not restart it' })
             Set-Card $c bad 'Not responding' "$act. $detail".Trim()
         } elseif ($nt.ControlCenterHung -eq $true) {
-            $act = $(if ($prot.restartWhenFrozen) { 'Guard restarts NinjaTrader if it stays frozen' } else { 'Protection is set to alert only, so Guard will not restart it' })
+            $act = $(if ($stop.Stopped) { 'Guard is stopped, so it will not restart it' } elseif ($prot.restartWhenFrozen) { 'Guard restarts NinjaTrader if it stays frozen' } else { 'Protection is set to alert only, so Guard will not restart it' })
             Set-Card $c bad 'Control Center not responding' "Other windows may still work. $act. $detail".Trim()
         } elseif ($nt.Title -eq 'Welcome') {
             Set-Card $c warn 'At its login window' "Waiting for the login to finish. $detail".Trim()
@@ -233,7 +257,9 @@ function Get-GuardStatus {
         $backoff = Read-UtcFile (Join-Path $state 'start.backoff-until')
         $hold = Test-Path (Join-Path $state 'start.loginhold')
         $locked = (Test-Path (Join-Path $state 'relaunch.lockedsince')) -or (Test-Path (Join-Path $state 'overwatch.lockedsince'))
-        if ($pause.Paused) {
+        if ($stop.Stopped) {
+            Set-Card $c off 'Not running' 'Guard is stopped, so it will not start NinjaTrader.'
+        } elseif ($pause.Paused) {
             Set-Card $c off 'Not running' "Guard is paused until $(& $T $pause.UntilUtc), so it will not start NinjaTrader."
         } elseif ($backoff -and $now -lt $backoff) {
             Set-Card $c bad 'Not running' "Restarts are stopped until $(& $T $backoff): NinjaTrader was restarted too often without staying up." 'Check the NinjaTrader login by hand; Guard tries again after that time.'
@@ -266,7 +292,7 @@ function Get-GuardStatus {
         elseif ([int]$arH.rung -gt 0) { Set-Card $c warn 'Recovering a silent feed' "The feed guard is on step $([int]$arH.rung) of 3 (re-subscribe, disconnect, reconnect). $via".Trim() }
         elseif ($null -eq $l1) { Set-Card $c warn 'No data yet' "No price has arrived for the watch list since the feed guard started. $via".Trim() }
         elseif ([double]$l1 -gt $limit) {
-            $act = $(if ($arH.autoRecover -eq $false) { 'auto-recovery is off, so it only alerts' } else { 'the feed guard steps in to recover it' })
+            $act = $(if ($stop.Stopped) { 'Guard is stopped, so the feed guard only watches' } elseif ($arH.autoRecover -eq $false) { 'auto-recovery is off, so it only alerts' } else { 'the feed guard steps in to recover it' })
             Set-Card $c bad "Silent for $(Format-GuardAge ([double]$l1))" "No price for longer than $(Format-GuardAge $limit); $act. $via".Trim()
         }
         else { Set-Card $c ok 'Live' (@("last price $(Format-GuardAge ([double]$l1)) ago", $via) | Where-Object { $_ }) -join ' - ' }
@@ -296,7 +322,10 @@ function Get-GuardStatus {
     $c = New-Card watchdogs 'Watchdogs'
     $words = { param($w) if ($w.Fresh) { "$($w.Label) checked $(Format-GuardAge $w.Age) ago" } else { "$($w.Label): $($w.Why)" } }
     $detail = (@($wd.Values | ForEach-Object { & $words $_ })) -join ' - '
-    if ($pause.Paused) { Set-Card $c off "Paused until $(& $T $pause.UntilUtc)" $(if ($pause.Reason) { "Reason: $($pause.Reason)" } else { 'Both watchdogs only watch while paused; the pause ends by itself.' }) }
+    if ($stop.Stopped) {
+        Set-Card $c off "Stopped$stopWhen" 'Guard''s tasks are switched off: nothing restarts NinjaTrader, reconnects it, puts a strategy back or alerts you.' 'Start Guard (at the top of this tab, or in Tools) when you want it back.'
+    }
+    elseif ($pause.Paused) { Set-Card $c off "Paused until $(& $T $pause.UntilUtc)" $(if ($pause.Reason) { "Reason: $($pause.Reason)" } else { 'Both watchdogs only watch while paused; the pause ends by itself.' }) }
     elseif ($wd.relaunch.Fresh -and $wd.overwatch.Fresh) { Set-Card $c ok 'Both running' $detail }
     else {
         $missing = @($wd.Values | Where-Object { -not $_.Fresh -and $_.Why -eq 'its task is not installed' })
@@ -317,7 +346,7 @@ function Get-GuardStatus {
             switch ($a.s) {
                 'missing'   { Set-Card $c bad 'Not installed' 'It has never reported from this NinjaTrader.' $importRemedy }
                 'notloaded' { Set-Card $c bad 'Not loaded' 'It has not reported since NinjaTrader started: removed, or it failed to compile after an update.' 'Open the NinjaScript Editor and press F5 to compile; if it is gone, import NT8Guard-AddOns.zip again.' }
-                'stale'     { Set-Card $c bad 'Stopped reporting' "It stopped reporting more than $(Format-GuardAge ([double]$a.stale)) ago while NinjaTrader runs - it is stuck." 'Guard restarts NinjaTrader if it stays stuck (Protection permitting).' }
+                'stale'     { Set-Card $c bad 'Stopped reporting' "It stopped reporting more than $(Format-GuardAge ([double]$a.stale)) ago while NinjaTrader runs - it is stuck." $(if ($stop.Stopped) { 'Guard is stopped, so it will not restart NinjaTrader.' } else { 'Guard restarts NinjaTrader if it stays stuck (Protection permitting).' }) }
                 default     { Set-Card $c ok 'Running' '' }
             }
         }
@@ -394,9 +423,16 @@ function Get-GuardStatus {
     # ---- banners, overall, events
     $banner = New-Object System.Collections.Generic.List[string]
     if ($Config.loadError) { $banner.Add((& $mask ([string]$Config.loadError))) }
+    # Stopped, yet the feed guard still reports recovery on well after the stop: it never took Stop's file.
+    $arAge = Get-FileAgeSeconds $arPath $now
+    if ($stop.Stopped -and $arH -and $arH.autoRecover -eq $true -and $stop.SinceUtc -and $null -ne $arAge -and $now.AddSeconds(-$arAge) -gt $stop.SinceUtc.AddSeconds(60)) {
+        $banner.Add('Guard is stopped, but the feed guard inside NinjaTrader still has recovery on: it did not take the stop''s settings. Press Start Guard, then Stop Guard again.')
+    }
+    if ($stop.Leftover) { $banner.Add('Guard was stopped from this panel, then its tasks were switched on outside it: the watchdogs run, but the feed guard still only watches (no reconnect, no recovery, no alert). Press Start Guard in Tools to give it your settings back.') }
     foreach ($f in $pause.LegacySwitches) { $banner.Add("$f in NinjaTrader's folder keeps that watchdog paused until the file is deleted (an older way to pause; use Pause instead).") }
     $states = @($cards | ForEach-Object { $_.State })
-    if ($pause.Paused) { $overall = @{ State = 'paused'; Text = "PAUSED until $(& $T $pause.UntilUtc)" } }
+    if ($stop.Stopped) { $overall = @{ State = 'stopped'; Text = "STOPPED$stopWhen" } }
+    elseif ($pause.Paused) { $overall = @{ State = 'paused'; Text = "PAUSED until $(& $T $pause.UntilUtc)" } }
     elseif ($states -contains 'bad') { $overall = @{ State = 'bad'; Text = 'ATTENTION' } }
     elseif ($states -contains 'warn' -or $banner.Count) { $overall = @{ State = 'warn'; Text = 'CHECK' } }
     else { $overall = @{ State = 'ok'; Text = 'ALL GOOD' } }
@@ -407,7 +443,7 @@ function Get-GuardStatus {
         [pscustomobject]@{ Utc = $u; Time = $(if ($u) { & $T $u } else { '' }); Source = $src; Kind = [string]$_.kind
                            Severity = [string]$_.severity; Text = (& $mask ([string]$_.text)) }
     })
-    return [pscustomobject]@{ NowUtc = $now; Overall = [pscustomobject]$overall; Pause = $pause; Banner = $banner.ToArray()
+    return [pscustomobject]@{ NowUtc = $now; Overall = [pscustomobject]$overall; Pause = $pause; Stop = $stop; Banner = $banner.ToArray()
                               Cards = $cards.ToArray(); Events = $ev; Nt8Running = [bool]$nt }
 }
 

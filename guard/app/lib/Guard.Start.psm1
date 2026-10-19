@@ -150,7 +150,7 @@ function Set-Nt8SeenHealthy {
 function Test-Nt8StartAllowed {
     # Spec 3.4 step 1, shared by every starter (the relauncher, and the overwatch when the relauncher is
     # not running). Returns 'ok' or why not:
-    #   paused | backing-off | held-locked                       (always checked)
+    #   paused | stopped | backing-off | held-locked             (always checked; stopped: Test-GuardStopHeld)
     #   relaunch-off | login-refused | backoff                   (with -ForLaunch, just before a start)
     # LOCKED SCREEN: the login cannot reach NinjaTrader's window, so starting only burns the budget and
     # then nothing starts for an hour after the unlock. Logged once per lock. The probe FAILS OPEN.
@@ -171,6 +171,8 @@ function Test-Nt8StartAllowed {
     $rl = $Config.relaunch
 
     if ((Get-GuardPauseState -Component $Component -GuardHome $GuardHome -Nt8Dir $Nt8Dir -NowUtc $t).Paused) { return 'paused' }
+    # Stopped (Tools > Stop Guard) while this watchdog run was already going: its task is off now.
+    if (($Component -eq 'relaunch' -or $Component -eq 'overwatch') -and (Test-GuardStopHeld -GuardHome $GuardHome)) { return 'stopped' }
 
     $backoff = Join-Path $state 'start.backoff-until'
     if (Test-Path $backoff) {
