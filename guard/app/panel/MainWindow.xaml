@@ -91,6 +91,7 @@
         </Border>
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
           <TextBlock Text="NT8 GUARD" Style="{StaticResource H1}"/>
+          <TextBlock x:Name="AppVersion" Text="" FontFamily="{StaticResource Mono}" FontSize="12" Foreground="{StaticResource Muted}" VerticalAlignment="Bottom" Margin="10,0,0,5"/>
           <TextBlock Text="keeps NinjaTrader running" Foreground="{StaticResource Muted}" FontSize="13" VerticalAlignment="Bottom" Margin="14,0,0,4"/>
         </StackPanel>
       </DockPanel>

@@ -66,6 +66,9 @@ Check 'the window XAML sets no IsReadOnly attribute (a clean Windows refused it)
 Check 'the masked topic and webhook boxes are still read-only' ((Ui 'NtfyTopicMasked').IsReadOnly -and (Ui 'WebhookMasked').IsReadOnly) ''
 $st = Get-GuardStatus -GuardHome $h.Home -Nt8Dir $h.Nt8 @sargs
 Check 'the pill shows the overall state' ((Ui 'OverallText').Text -eq $st.Overall.Text) "$((Ui 'OverallText').Text) vs $($st.Overall.Text)"
+$verFile = ([IO.File]::ReadAllText((Join-Path $script:AppDir 'VERSION'))).Trim()
+Check 'the header shows the version, from app\VERSION' ((Ui 'AppVersion').Text -eq "Ver $verFile") "'$((Ui 'AppVersion').Text)' vs app\VERSION '$verFile'"
+Check 'the window title stays "NT8 Guard" (the installer and the tests find the panel by it)' ($w.Title -eq 'NT8 Guard') $w.Title
 $shown = @(@((Ui 'Cards').ItemsSource) | ForEach-Object { $_.Cards })
 Check 'eight status cards, four to a row' ($shown.Count -eq 8 -and @((Ui 'Cards').ItemsSource).Count -eq 2) "$($shown.Count) in $(@((Ui 'Cards').ItemsSource).Count) rows"
 Check 'events listed, newest first' (@((Ui 'Events').ItemsSource)[0].Text -match 'frozen') ''

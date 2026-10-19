@@ -912,6 +912,7 @@ function Initialize-Panel {
     # screenshot mode and the tests.
     [CmdletBinding()] param([hashtable]$StatusArgs = @{})
     $script:Win = New-PanelWindow
+    (Ui 'AppVersion').Text = "Ver $(Get-GuardVersion)"     # app\VERSION ('dev' in a checkout without it)
     $script:CardSig = $null; $script:EventSig = $null; $script:CardCols = 4
     $script:ActionView = $null; $script:ActionProgress = $null; $script:CleanupScript = $null; $script:WizardMode = $null
     Show-PanelSettings
